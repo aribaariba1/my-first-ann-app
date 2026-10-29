@@ -1,0 +1,68 @@
+{
+  "name": "tool-dev-my-first-anna-app",
+  "display_name": "Smart Kitchen Assistant",
+  "version": "0.2.0",
+  "description": "Cooking assistant brain for the Smart Kitchen Assistant app: suggests recipes from available ingredients, teaches how to cook a pictured dish, and summarizes conversations. Uses host sampling (no API key).",
+  "author": "Smart Kitchen Assistant",
+  "host_capabilities": ["llm.sample"],
+  "runtime": {
+    "binary": {
+      "entrypoint": {
+        "default": "tool-dev-my-first-anna-app",
+        "windows-x86_64": "tool-dev-my-first-anna-app.exe",
+        "windows-arm64": "tool-dev-my-first-anna-app.exe"
+      },
+      "permissions": {
+        "tool-dev-my-first-anna-app": "0o755"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "chat",
+      "description": "Produce the kitchen assistant's next reply for a conversation. Optionally include a text description of photos/video frames (ingredients or a finished dish) produced by a vision model.",
+      "parameters": [
+        {
+          "name": "messages",
+          "type": "array",
+          "items_type": "object",
+          "description": "Conversation so far: [{role:'user'|'assistant', content:string}]. Last item is the new user turn.",
+          "required": true
+        },
+        {
+          "name": "vision_context",
+          "type": "string",
+          "description": "Optional analysis of the images attached to the latest user turn.",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "description": "auto | ingredients | dish | general",
+          "required": false,
+          "default": "auto"
+        }
+      ]
+    },
+    {
+      "name": "summarize_conversation",
+      "description": "Return a short title and one-paragraph summary for a conversation.",
+      "parameters": [
+        {
+          "name": "messages",
+          "type": "array",
+          "items_type": "object",
+          "description": "Conversation: [{role, content}].",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "ping",
+      "description": "Smoke-test method.",
+      "parameters": []
+    }
+  ]
+}
+

@@ -1,0 +1,26 @@
+# Python / PyInstaller build artifacts (never commit compiled binaries)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+*.dll
+*.exe
+*.spec
+build/
+dist/
+dist-anna/
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Release archives and checksums
+*.tar.gz
+*.tgz
+*.zip
+*.sha256
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+

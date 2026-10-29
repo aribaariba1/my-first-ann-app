@@ -1,0 +1,214 @@
+# ==============================================================================
+# Build & Release Multi-Platform Binaries for Smart Kitchen Assistant Executa
+# ==============================================================================
+# Manually triggered via `workflow_dispatch` (or automatically when a GitHub
+# Release is published). Builds standalone PyInstaller binaries for:
+#   - darwin-arm64   (macOS Apple Silicon, macos-14)
+#   - darwin-x86_64  (macOS Intel x86_64 via Rosetta 2 x64 Python on macos-15)
+#   - linux-x86_64   (Linux x86_64, ubuntu-latest)
+#   - windows-x86_64 (Windows x86_64, windows-latest)
+#
+# Outputs:
+#   - Unix:    my-first-anna-app-<version>-<platform>.tar.gz  (+ .sha256)
+#   - Windows: my-first-anna-app-<version>-windows-x86_64.zip (+ .sha256)
+# ==============================================================================
+
+name: Build & Release Executa Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GitHub Release tag to publish assets to (leave empty to default to my-first-anna-app-v<version>)"
+        required: false
+        default: ""
+        type: string
+      publish_release:
+        description: "Publish artifacts and SHA-256 checksums to GitHub Release assets"
+        required: false
+        default: true
+        type: boolean
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: executa-binaries-${{ github.ref_name }}-${{ github.event.inputs.tag || 'default' }}
+  cancel-in-progress: false
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # 1. Read Executa metadata (slug, version, tool_id, entrypoint) from disk
+  # ----------------------------------------------------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      slug: ${{ steps.meta.outputs.slug }}
+      version: ${{ steps.meta.outputs.version }}
+      tool_id: ${{ steps.meta.outputs.tool_id }}
+      entry_py: ${{ steps.meta.outputs.entry_py }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve Executa metadata
+        id: meta
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, tomllib
+          from pathlib import Path
+
+          exe_dir = Path("executas/my-first-anna-app")
+          ej = json.loads((exe_dir / "executa.json").read_text("utf-8"))
+          pp = tomllib.loads((exe_dir / "pyproject.toml").read_text("utf-8"))["project"]
+
+          slug = ej["slug"]
+          version = ej["version"]
+          tool_id = pp["name"]
+          script_target = pp["scripts"][tool_id]
+          module_name = script_target.split(":", 1)[0]
+          entry_py = f"{module_name}.py"
+
+          input_tag = (os.environ.get("INPUT_TAG") or "").strip()
+          event_name = os.environ.get("EVENT_NAME") or ""
+          ref_name = os.environ.get("REF_NAME") or ""
+
+          if event_name == "release" and ref_name:
+              tag = ref_name
+          elif input_tag:
+              tag = input_tag
+          else:
+              tag = f"{slug}-v{version}"
+
+          out_lines = [
+              f"slug={slug}",
+              f"version={version}",
+              f"tool_id={tool_id}",
+              f"entry_py={entry_py}",
+              f"tag={tag}",
+          ]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("\n".join(out_lines) + "\n")
+          print("\n".join(out_lines))
+          PY
+
+  # ----------------------------------------------------------------------------
+  # 2. Build standalone PyInstaller binaries across all 4 target platforms
+  # ----------------------------------------------------------------------------
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon (ARM64) — native arm64 M1 runner
+          - platform: darwin-arm64
+            os: macos-14
+            python_arch: arm64
+            entrypoint: tool-dev-my-first-anna-app
+            ext: tar.gz
+
+          # macOS Intel (x86_64) — macos-15 Apple Silicon runner with x64 Python
+          # under Rosetta 2 (since GitHub retired macos-13 Intel runners)
+          - platform: darwin-x86_64
+            os: macos-15
+            python_arch: x64
+            entrypoint: tool-dev-my-first-anna-app
+            ext: tar.gz
+
+          # Linux x86_64 — standard Ubuntu LTS x86_64 runner
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            python_arch: x64
+            entrypoint: tool-dev-my-first-anna-app
+            ext: tar.gz
+
+          # Windows x86_64 — standard Windows Server x86_64 runner
+          - platform: windows-x86_64
+            os: windows-latest
+            python_arch: x64
+            entrypoint: tool-dev-my-first-anna-app.exe
+            ext: zip
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (${{ matrix.platform }})
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build & package Executa binary (${{ matrix.platform }})
+        shell: bash
+        working-directory: executas/my-first-anna-app
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          bash ./build_binary.sh
+
+      - name: Verify archive & checksum files
+        shell: bash
+        working-directory: executas/my-first-anna-app/dist
+        env:
+          ARCHIVE: ${{ needs.plan.outputs.slug }}-${{ needs.plan.outputs.version }}-${{ matrix.platform }}.${{ matrix.ext }}
+          ENTRYPOINT: ${{ matrix.entrypoint }}
+        run: |
+          test -f "$ARCHIVE"
+          test -f "$ARCHIVE.sha256"
+          cat "$ARCHIVE.sha256"
+          python - "$ARCHIVE" "$ENTRYPOINT" <<'PY'
+          import sys, tarfile, zipfile
+          archive, entrypoint = sys.argv[1], sys.argv[2]
+          if archive.endswith(".zip"):
+              with zipfile.ZipFile(archive, "r") as zf:
+                  names = zf.namelist()
+          else:
+              with tarfile.open(archive, "r:gz") as tf:
+                  names = [m.name.lstrip("./") for m in tf.getmembers()]
+          print(f"Archive members ({archive}): {names}")
+          assert entrypoint in names, f"Expected entrypoint {entrypoint!r} in {names}"
+          assert "manifest.json" in names, f"Expected manifest.json in {names}"
+          PY
+
+      - name: Upload workflow run artifact (${{ matrix.platform }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.plan.outputs.slug }}-${{ needs.plan.outputs.version }}-${{ matrix.platform }}
+          path: |
+            executas/my-first-anna-app/dist/${{ needs.plan.outputs.slug }}-${{ needs.plan.outputs.version }}-${{ matrix.platform }}.${{ matrix.ext }}
+            executas/my-first-anna-app/dist/${{ needs.plan.outputs.slug }}-${{ needs.plan.outputs.version }}-${{ matrix.platform }}.${{ matrix.ext }}.sha256
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release (${{ needs.plan.outputs.tag }})
+        if: ${{ github.event_name == 'release' || github.event.inputs.publish_release != 'false' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          name: "${{ needs.plan.outputs.slug }} v${{ needs.plan.outputs.version }}"
+          body: |
+            Multi-platform standalone PyInstaller binaries for the **Smart Kitchen Assistant** Executa (`${{ needs.plan.outputs.slug }}` v`${{ needs.plan.outputs.version }}`, entrypoint `${{ needs.plan.outputs.tool_id }}`).
+
+            ### Local Direct Upload (`binary_artifacts`)
+            Download all platform archives into `executas/my-first-anna-app/dist/` and run:
+            ```bash
+            anna-app executa upload-binaries --dir executas/my-first-anna-app
+            ```
+          files: |
+            executas/my-first-anna-app/dist/${{ needs.plan.outputs.slug }}-${{ needs.plan.outputs.version }}-${{ matrix.platform }}.${{ matrix.ext }}
+            executas/my-first-anna-app/dist/${{ needs.plan.outputs.slug }}-${{ needs.plan.outputs.version }}-${{ matrix.platform }}.${{ matrix.ext }}.sha256
+

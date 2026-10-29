@@ -35,6 +35,7 @@ MAX_SAMPLING_MESSAGES = 64     # host per-request message cap
 SAMPLING_TIMEOUT_S = 60.0      # keep inside tools.invoke 90s ceiling
 
 MANIFEST = {
+    "name": "tool-dev-my-first-anna-app",
     "display_name": "Smart Kitchen Assistant",
     "version": VERSION,
     "description": (

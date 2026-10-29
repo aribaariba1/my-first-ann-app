@@ -1,9 +1,10 @@
 {
-  "slug": "smart-kitchen-assistant",
+  "slug": "my-first-anna-app",
   "name": "Smart Kitchen Assistant",
   "version": "0.2.0",
   "executa_type": "tool",
   "description": "Kitchen-assistant brain for the Smart Kitchen Assistant app: recipe suggestions from ingredients, step-by-step dish tutorials and conversation summaries via host sampling/createMessage (no API key).",
+  "manifest_file": "manifest.json",
 
   "tool_id": "tool-dev-my-first-anna-app",
   "type": "python",
@@ -20,11 +21,31 @@
         "type": "binary",
         "executable_name": "tool-dev-my-first-anna-app",
         "supports_protocol": true,
-        "binary_urls": {}
+        "binary_artifacts": {
+          "darwin-arm64": {
+            "path": "dist/my-first-anna-app-{version}-darwin-arm64.tar.gz",
+            "entrypoint": "tool-dev-my-first-anna-app",
+            "format": "tar.gz"
+          },
+          "darwin-x86_64": {
+            "path": "dist/my-first-anna-app-{version}-darwin-x86_64.tar.gz",
+            "entrypoint": "tool-dev-my-first-anna-app",
+            "format": "tar.gz"
+          },
+          "linux-x86_64": {
+            "path": "dist/my-first-anna-app-{version}-linux-x86_64.tar.gz",
+            "entrypoint": "tool-dev-my-first-anna-app",
+            "format": "tar.gz"
+          },
+          "windows-x86_64": {
+            "path": "dist/my-first-anna-app-{version}-windows-x86_64.zip",
+            "entrypoint": "tool-dev-my-first-anna-app.exe",
+            "format": "zip"
+          }
+        }
       }
     }
   },
 
-  "_comment": "Publish metadata (slug/name/version/executa_type) is read by `anna-app apps publish`; tool_id/type/distribution drive local dev. Fill binary_urls (per-platform tar.gz/zip built with PyInstaller) before switching distribution.active to 'binary'."
+  "_comment": "Publish metadata (slug/name/version/executa_type) is read by `anna-app apps publish`; the dev fields (tool_id/type/enabled) are read by `anna-app dev`. This dir is the `my-first-anna-app` handle referenced by app.json#bundled_executas. Place downloaded GitHub Release archives into executas/my-first-anna-app/dist/ and flip distribution.active to 'binary' (or pass --profile binary) when publishing binaries."
 }
-
