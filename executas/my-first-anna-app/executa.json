@@ -11,7 +11,7 @@
   "enabled": true,
 
   "distribution": {
-    "active": "local",
+    "active": "binary",
     "profiles": {
       "local": {
         "type": "local",

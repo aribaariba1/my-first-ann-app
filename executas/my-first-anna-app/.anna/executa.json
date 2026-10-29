@@ -1,0 +1,9 @@
+{
+  "$schema": "anna-executa-identity/v1",
+  "host": "https://anna.partners",
+  "executa_id": 1285,
+  "tool_id": "tool-nathan-ariba-my-first-anna-app-uh2she4e",
+  "slug": "my-first-anna-app",
+  "executa_type": "tool",
+  "first_published_at": "2026-10-29T22:02:47.982Z"
+}

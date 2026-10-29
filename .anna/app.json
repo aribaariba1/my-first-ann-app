@@ -1,0 +1,8 @@
+{
+  "$schema": "anna-app-identity/v1",
+  "host": "https://anna.partners",
+  "app_id": 752,
+  "slug": "smart-kitchen-assistant",
+  "handle": "nathan-ariba",
+  "first_published_at": "2026-10-29T22:02:52.631Z"
+}
