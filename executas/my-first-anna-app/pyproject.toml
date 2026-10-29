@@ -3,13 +3,22 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
+# The script name MUST equal `project.name` (= the tool_id), because
+# `anna-app dev` spawns the executa with `uvx <project.name>`.
 name = "tool-dev-my-first-anna-app"
-version = "0.1.0"
-description = "Executa for the my-first-anna-app Anna App"
+version = "0.2.0"
+description = "Smart Kitchen Assistant Executa: recipe suggestions, dish tutorials and conversation summaries via host sampling."
 requires-python = ">=3.10"
+dependencies = []
 
 [project.scripts]
 "tool-dev-my-first-anna-app" = "my_first_anna_app_plugin:main"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [tool.setuptools]
 py-modules = ["my_first_anna_app_plugin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

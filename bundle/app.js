@@ -1,38 +1,513 @@
-// Minimal Anna App bundle entry. Replace with real logic.
+// Smart Kitchen Assistant - Anna App bundle (plain ES modules, no build step).
+//
+// Responsibilities split (see README):
+//   * iframe (this file): chat UI, history sidebar, photo handling,
+//     vision step via anna.llm.complete (image blocks), persistence via
+//     anna.storage (conversations) + anna.files (photos).
+//   * Python Executa (tool-dev-my-first-anna-app): cooking reasoning and
+//     conversation summaries via reverse sampling/createMessage.
 import { AnnaAppRuntime } from "/static/anna-apps/_sdk/latest/index.js";
+import { prepareImage, formatBytes, MAX_IMAGES } from "./media.js";
+import { renderMarkdown } from "./markdown.js";
 
+// Must match manifest.json required_executas[].tool_id and host_api.tools.
 const TOOL_ID = "tool-dev-my-first-anna-app";
+const INDEX_KEY = "convs/index";
+const convKey = (id) => `convs/${id}`;
+const IMAGE_PREFIX = "images/";
+const KV_IMAGE_PREFIX = "images_kv/";
+const DEFAULT_PHOTO_PROMPT = "Here is a photo. Please help me.";
+
+const VISION_PROMPT = `You are the vision step of a cooking assistant. Look at the attached photo(s) and reply ONLY with JSON:
+{"kind": "ingredients" | "dish" | "other",
+ "dish_name": "<if kind=dish: most likely dish name, else empty>",
+ "confidence": "high" | "medium" | "low",
+ "items": ["<every visible ingredient / component, with rough quantity if visible>"],
+ "description": "<2-3 sentences: what is visible, cooking style, cuisine, garnish, sides>"}
+"ingredients" = raw/uncooked ingredients or pantry items; "dish" = a prepared/plated meal; "other" = not food.`;
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+let anna = null;
+let index = [];            // [{id,title,summary,updated_at,image_count}]
+let current = null;        // full conversation object
+let pending = [];          // prepared images waiting to be sent
+let busy = false;
+const urlCache = new Map(); // path -> {url, exp}
+
+// ------------------------------------------------------------------ utils
+function toast(msg, ms = 3500) {
+  const t = $("toast"); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms);
+}
+function setStatus(s) { $("status").textContent = s; }
+
+function friendlyError(e) {
+  const code = String(e?.code || e?.data?.code || "");
+  const msg = String(e?.message || e);
+  const all = `${code} ${msg}`;
+  if (/-32001|SAMPLING_NOT_GRANTED/i.test(all)) return "Sampling is not enabled for the Smart Kitchen Executa. Enable it in Anna → Admin → Executa permissions.";
+  if (/-32008|NOT_NEGOTIATED/i.test(all)) return "The Executa could not negotiate sampling with the host (protocol v2). Restart the Executa.";
+  if (/QUOTA|-32002/i.test(all)) return "Your Anna quota is exhausted. Please top up or try later.";
+  if (/APP_NOT_GRANTED|not_granted|permission_denied/i.test(all)) return `Permission missing: ${msg}`;
+  if (/executa_unavailable|agent_unavailable/i.test(all)) return "The kitchen Executa is not running. Make sure your Anna agent is online (or `anna-app dev` is running).";
+  if (/tool_timeout|TIMEOUT|-32005/i.test(all)) return "The assistant took too long to answer. Please try again.";
+  if (/too_large|quota_exceeded|value_too_large/i.test(all)) return "Storage is full. Use “Clear all photos” in the sidebar to free space.";
+  return msg;
+}
+
+function unwrapTool(out) {
+  if (out && out.success === false) throw new Error(out.error || "tool_failed");
+  if (out && out.data && (out.success === true || out.tool)) return out.data;
+  return out;
+}
+
+async function callExecuta(method, args, timeoutMs = 90000) {
+  const res = await anna.tools.invoke(
+    { tool_id: TOOL_ID, method, args, timeoutMs: Math.min(90000, timeoutMs) },
+    { timeoutMs: Math.min(90000, timeoutMs) + 5000 }
+  );
+  return unwrapTool(res);
+}
+
+async function confirmBox(text) {
+  // window.confirm is unavailable in sandboxed iframes without allow-modals.
+  return new Promise((resolve) => {
+    const wrap = el("div", "", "");
+    wrap.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:20";
+    const box = el("div", "", "");
+    box.style.cssText = "background:#fff;padding:18px;border-radius:12px;max-width:340px;font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.2)";
+    box.append(el("p", "", "")); box.firstChild.textContent = text;
+    const row = el("div", "", ""); row.style.cssText = "display:flex;gap:8px;justify-content:flex-end";
+    const no = el("button", "btn", "Cancel"), yes = el("button", "btn primary", "Delete");
+    no.type = yes.type = "button";
+    const done = (v) => { wrap.remove(); resolve(v); };
+    no.onclick = () => done(false); yes.onclick = () => done(true);
+    row.append(no, yes); box.append(row); wrap.append(box); document.body.append(wrap);
+  });
+}
+
+// ---------------------------------------------------------------- storage
+async function setKvWithSpaceGuard(key, value, extra = {}) {
+  try {
+    return await anna.storage.set({ key, value, ...extra });
+  } catch (e) {
+    if (/too_large|quota_exceeded|value_too_large/i.test(String(e?.code || e?.message))) {
+      await evictOldestKvImages(2);
+      return await anna.storage.set({ key, value, ...extra });
+    }
+    throw e;
+  }
+}
+
+async function loadIndex() {
+  const r = await anna.storage.get({ key: INDEX_KEY });
+  index = Array.isArray(r?.value) ? r.value : [];
+}
+async function saveIndex() { await setKvWithSpaceGuard(INDEX_KEY, index); }
+
+async function loadConversation(id) {
+  const r = await anna.storage.get({ key: convKey(id) });
+  return r?.exists === false ? null : r?.value;
+}
+
+async function saveConversation(conv) {
+  conv.updated_at = new Date().toISOString();
+  await setKvWithSpaceGuard(convKey(conv.id), conv, { tags: ["conversation"] });
+  const entry = {
+    id: conv.id, title: conv.title, summary: conv.summary || "",
+    updated_at: conv.updated_at,
+    image_count: conv.messages.reduce((n, m) => n + (m.images || []).filter((i) => i.path && !i.deleted).length, 0),
+  };
+  index = [entry, ...index.filter((c) => c.id !== conv.id)];
+  await saveIndex();
+  renderSidebar();
+}
+
+async function uploadImage(img, path) {
+  try {
+    const init = await anna.files.upload_init({ path, content_type: img.mimeType, size: img.size });
+    const res = await fetch(init.put_url, { method: "PUT", headers: { "Content-Type": img.mimeType, ...(init.headers || {}) }, body: img.blob });
+    if (!res.ok) throw new Error(`upload failed (${res.status})`);
+    const etag = res.headers.get("ETag") || undefined;
+    await anna.files.upload_finalize({ path, size: img.size, ...(etag ? { etag } : {}) });
+    return path;
+  } catch (e) {
+    if (/not_implemented|endpoint not yet available/i.test(String(e?.code || e?.message))) {
+      const kvKey = `${KV_IMAGE_PREFIX}${path.slice(IMAGE_PREFIX.length)}`;
+      const b64 = img.thumbBase64 || img.base64;
+      const sz = img.thumbSize || img.size;
+      const payload = { mimeType: img.mimeType, base64: b64, size: sz, ts: Date.now() };
+      try {
+        await anna.storage.set({ key: kvKey, value: payload, metadata: { size_bytes: sz } });
+      } catch (kvErr) {
+        if (/too_large|quota_exceeded|value_too_large/i.test(String(kvErr?.code || kvErr?.message))) {
+          await evictOldestKvImages(1);
+          await anna.storage.set({ key: kvKey, value: payload, metadata: { size_bytes: sz } });
+        } else {
+          throw kvErr;
+        }
+      }
+      return `kv:${kvKey}`;
+    }
+    throw e;
+  }
+}
+
+async function evictOldestKvImages(minCount = 1) {
+  try {
+    const r = await anna.storage.list({ prefix: KV_IMAGE_PREFIX, limit: 1000 });
+    const keys = (r.items || []).map((i) => i.key).sort();
+    const toRemove = keys.slice(0, Math.max(minCount, Math.ceil(keys.length / 2)));
+    for (const k of toRemove) {
+      await anna.storage.delete({ key: k });
+      urlCache.delete(`kv:${k}`);
+    }
+  } catch { /* ignore */ }
+}
+
+async function imageUrl(path) {
+  const c = urlCache.get(path);
+  if (c && c.exp > Date.now()) return c.url;
+  if (path.startsWith("kv:")) {
+    const r = await anna.storage.get({ key: path.slice(3) });
+    if (!r?.value?.base64) throw new Error("not_found");
+    const url = `data:${r.value.mimeType || "image/jpeg"};base64,${r.value.base64}`;
+    urlCache.set(path, { url, exp: Date.now() + 50 * 60 * 1000 });
+    return url;
+  }
+  const r = await anna.files.download_url({ path, ttl_seconds: 3600 });
+  urlCache.set(path, { url: r.get_url, exp: Date.now() + 50 * 60 * 1000 });
+  return r.get_url;
+}
+
+async function deleteImageFile(path) {
+  try {
+    if (path.startsWith("kv:")) {
+      await anna.storage.delete({ key: path.slice(3) });
+    } else {
+      await anna.files.delete({ path });
+    }
+  } catch (e) {
+    if (!/not_found/i.test(String(e?.code || e?.message))) throw e;
+  }
+  urlCache.delete(path);
+}
+
+async function refreshUsage() {
+  let total = 0, count = 0;
+  try {
+    let cursor;
+    do {
+      const r = await anna.files.list({ prefix: IMAGE_PREFIX, limit: 1000, ...(cursor ? { cursor } : {}) });
+      for (const it of r.items || []) { total += it.size_bytes || 0; count++; }
+      cursor = r.next_cursor;
+    } while (cursor);
+  } catch { /* files.* may be not_implemented in legacy dev storage */ }
+  try {
+    let cursor;
+    do {
+      const r = await anna.storage.list({ prefix: KV_IMAGE_PREFIX, limit: 1000, ...(cursor ? { cursor } : {}) });
+      for (const it of r.items || []) { total += it.metadata?.size_bytes || it.size_bytes || 0; count++; }
+      cursor = r.next_cursor;
+    } while (cursor);
+  } catch { /* ignore */ }
+  $("storage-usage").textContent = `Photo storage: ${count} photo${count === 1 ? "" : "s"} · ${formatBytes(total)}`;
+}
+
+// ---------------------------------------------------------------- sidebar
+function renderSidebar() {
+  const list = $("conv-list"); list.innerHTML = "";
+  const q = $("search").value.trim().toLowerCase();
+  const items = index.filter((c) => !q || `${c.title} ${c.summary}`.toLowerCase().includes(q));
+  if (!items.length) { list.append(el("li", "empty", q ? "No matches." : "No conversations yet.")); return; }
+  for (const c of items) {
+    const li = el("li", current?.id === c.id ? "active" : "");
+    const meta = el("div", "meta");
+    const t = el("div", "t"); t.textContent = (c.image_count ? "📷 " : "") + (c.title || "Untitled");
+    const s = el("div", "s"); s.textContent = c.summary || new Date(c.updated_at).toLocaleString();
+    meta.append(t, s);
+    const del = el("button", "del", "🗑"); del.title = "Delete conversation and its photos";
+    del.onclick = (ev) => { ev.stopPropagation(); deleteConversation(c.id); };
+    li.append(meta, del);
+    li.onclick = () => openConversation(c.id);
+    list.append(li);
+  }
+}
+
+async function openConversation(id) {
+  if (busy) return;
+  try {
+    const conv = await loadConversation(id);
+    if (!conv) { toast("Conversation not found."); index = index.filter((c) => c.id !== id); await saveIndex(); renderSidebar(); return; }
+    current = conv; renderConversation(); renderSidebar();
+    if (window.innerWidth < 700) $("app").classList.add("collapsed");
+  } catch (e) { toast(friendlyError(e)); }
+}
+
+function newChat() {
+  if (busy) return;
+  current = null; pending = []; renderAttachments(); renderConversation(); renderSidebar();
+  $("input").focus();
+}
+
+async function deleteConversation(id) {
+  if (!(await confirmBox("Delete this conversation and all of its photos?"))) return;
+  try {
+    const conv = await loadConversation(id);
+    for (const m of conv?.messages || []) for (const img of m.images || []) if (img.path && !img.deleted) await deleteImageFile(img.path);
+    await anna.storage.delete({ key: convKey(id) });
+    index = index.filter((c) => c.id !== id); await saveIndex();
+    if (current?.id === id) newChat(); else renderSidebar();
+    refreshUsage(); toast("Conversation deleted.");
+  } catch (e) { toast(friendlyError(e)); }
+}
+
+async function clearAllPhotos() {
+  if (!(await confirmBox("Delete ALL stored photos? Your conversations and recipes are kept."))) return;
+  setStatus("Clearing photos…");
+  try {
+    let n = 0;
+    const paths = [];
+    try {
+      let cursor;
+      do {
+        const r = await anna.files.list({ prefix: IMAGE_PREFIX, limit: 1000, ...(cursor ? { cursor } : {}) });
+        paths.push(...(r.items || []).map((i) => i.path)); cursor = r.next_cursor;
+      } while (cursor);
+    } catch { /* files.* may be not_implemented in legacy dev mode */ }
+    try {
+      let cursor;
+      do {
+        const r = await anna.storage.list({ prefix: KV_IMAGE_PREFIX, limit: 1000, ...(cursor ? { cursor } : {}) });
+        paths.push(...(r.items || []).map((i) => `kv:${i.key}`)); cursor = r.next_cursor;
+      } while (cursor);
+    } catch { /* ignore */ }
+    for (const p of paths) { await deleteImageFile(p); n++; }
+    for (const entry of index.filter((c) => c.image_count)) {
+      const conv = await loadConversation(entry.id); if (!conv) continue;
+      conv.messages.forEach((m) => (m.images || []).forEach((i) => (i.deleted = true)));
+      const keepCurrent = current?.id === conv.id;
+      await saveConversation(conv); if (keepCurrent) current = conv;
+    }
+    renderConversation(); refreshUsage(); toast(`Deleted ${n} photo${n === 1 ? "" : "s"}.`);
+  } catch (e) { toast(friendlyError(e)); }
+  setStatus("Ready");
+}
+
+async function deleteSingleImage(msg, img) {
+  if (!(await confirmBox("Delete this photo? The text of the conversation is kept."))) return;
+  try {
+    await deleteImageFile(img.path); img.deleted = true;
+    await saveConversation(current); renderConversation(); refreshUsage();
+  } catch (e) { toast(friendlyError(e)); }
+}
+
+// ------------------------------------------------------------------- chat
+function thumbFor(img, msg) {
+  const box = el("div", "thumb");
+  if (img.canvas) { box.append(img.canvas); return box; }
+  if (img.deleted || !img.path) { box.textContent = img.deleted ? "Photo deleted" : "Photo not saved"; return box; }
+  box.textContent = "Loading…";
+  imageUrl(img.path).then((url) => {
+    const im = new Image(); im.alt = "attached photo"; im.src = url;
+    im.onerror = () => (box.textContent = "Photo unavailable");
+    box.textContent = ""; box.append(im);
+    const x = el("button", "x", "✕"); x.type = "button"; x.title = "Delete this photo";
+    x.onclick = () => deleteSingleImage(msg, img); box.append(x);
+  }).catch(() => (box.textContent = "Photo unavailable"));
+  return box;
+}
+
+function renderMessage(m) {
+  const div = el("div", `msg ${m.role}`);
+  if (m.role === "user") {
+    if (m.images?.length) { const g = el("div", "imgs"); m.images.forEach((i) => g.append(thumbFor(i, m))); div.append(g); }
+    div.append(document.createTextNode(m.content));
+    if (m.vision) {
+      const d = el("details"); d.append(el("summary", "", "What the assistant saw"));
+      const p = el("div"); p.textContent = m.vision; d.append(p); div.append(d);
+    }
+  } else if (m.role === "assistant") {
+    if (m.mode) div.append(el("span", "badge", { ingredients: "🥕 From your ingredients", dish: "🍲 Dish tutorial", general: "💬 Cooking help" }[m.mode] || m.mode));
+    div.append(el("div", "", renderMarkdown(m.content)));
+  } else div.textContent = m.content;
+  return div;
+}
+
+function renderConversation() {
+  const box = $("messages"); box.innerHTML = "";
+  $("conv-title").textContent = current?.title || "New conversation";
+  const sumBtn = $("summarize-btn");
+  if (sumBtn) sumBtn.hidden = !current || !current.messages.length;
+  if (!current || !current.messages.length) { box.append(welcomeNode); return; }
+  current.messages.forEach((m) => box.append(renderMessage(m)));
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendNode(node) { const box = $("messages"); $("welcome")?.remove(); box.append(node); box.scrollTop = box.scrollHeight; return node; }
+
+function renderAttachments() {
+  const a = $("attachments"); a.innerHTML = "";
+  pending.forEach((img, i) => {
+    const t = el("div", "thumb"); t.append(img.canvas);
+    const x = el("button", "x", "✕"); x.type = "button"; x.title = "Remove";
+    x.onclick = () => { pending.splice(i, 1); renderAttachments(); };
+    t.append(x); a.append(t);
+  });
+}
+
+async function addFiles(files) {
+  for (const f of files) {
+    if (pending.length >= MAX_IMAGES) { toast(`Up to ${MAX_IMAGES} photos per message.`); break; }
+    try { pending.push(await prepareImage(f)); } catch (e) { toast(String(e.message || e)); }
+  }
+  renderAttachments();
+}
+
+async function analyzeImages(images, userText) {
+  const content = [{ type: "text", text: `${VISION_PROMPT}\n\nUser's message: ${userText}` }];
+  images.forEach((i) => content.push({ type: "image", data: i.base64, mimeType: i.mimeType }));
+  const r = await anna.llm.complete({ messages: [{ role: "user", content }], maxTokens: 450, temperature: 0.2 }, { timeoutMs: 180000 });
+  const text = r?.content?.text || "";
+  const m = text.match(/\{[\s\S]*\}/);
+  if (m) { try { const parsed = JSON.parse(m[0]); return { parsed, text: JSON.stringify(parsed, null, 1) }; } catch { /* fall through */ } }
+  return { parsed: null, text: text.trim() };
+}
+
+function historyForTool(conv) {
+  // Text-only transcript for sampling; earlier photos are represented by
+  // the vision analysis captured when they were sent.
+  return conv.messages.filter((m) => m.role === "user" || m.role === "assistant").map((m) => ({
+    role: m.role,
+    content: m.role === "user" && m.vision && m !== conv.messages[conv.messages.length - 1]
+      ? `${m.content}\n\n[Photos I sent earlier showed: ${m.vision}]` : m.content,
+  }));
+}
+
+async function summarize(conv) {
+  try {
+    const out = await callExecuta("summarize_conversation", { messages: historyForTool(conv) }, 90000);
+    if (out?.title) {
+      conv.title = out.title; conv.summary = out.summary || "";
+      if (current?.id === conv.id) $("conv-title").textContent = conv.title;
+      await saveConversation(conv);
+    }
+  } catch (e) { console.warn("summary failed", e); }
+}
+
+async function send(ev) {
+  ev?.preventDefault();
+  if (busy || !anna) return;
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text && !pending.length) return;
+  busy = true; $("send").disabled = true;
+
+  const images = pending; pending = []; renderAttachments(); input.value = ""; autoGrow();
+  const modeSel = $("mode").value;
+  if (!current) current = { id: uid(), title: (text || "Photo chat").slice(0, 48), summary: "", created_at: new Date().toISOString(), messages: [] };
+  const conv = current;
+  const userMsg = { id: uid(), role: "user", content: text || DEFAULT_PHOTO_PROMPT, ts: Date.now(),
+    images: images.map((img) => ({ canvas: img.canvas, path: null, size: img.size })) };
+  conv.messages.push(userMsg);
+  $("conv-title").textContent = conv.title;
+  appendNode(renderMessage(userMsg));
+  const typing = appendNode(el("div", "msg assistant typing", "<span></span><span></span><span></span>"));
+
+  try {
+    // 1) persist photos (best effort - chat still works if storage is full)
+    if (images.length) {
+      setStatus("Saving photos…");
+      await Promise.all(images.map(async (img, i) => {
+        try { userMsg.images[i].path = await uploadImage(img, `${IMAGE_PREFIX}${conv.id}/${userMsg.id}-${i}.jpg`); }
+        catch (e) { toast(`Photo not saved: ${friendlyError(e)}`); }
+      }));
+    }
+    // 2) vision via Host API (image blocks) - sampling is text-only
+    let mode = modeSel;
+    if (images.length) {
+      setStatus("Looking at your photos…");
+      try {
+        const v = await analyzeImages(images, userMsg.content);
+        userMsg.vision = v.text;
+        if (mode === "auto" && ["ingredients", "dish"].includes(v.parsed?.kind)) mode = v.parsed.kind;
+      } catch (e) {
+        userMsg.vision = "(The photo could not be analysed - the selected model may not support images.)";
+        toast(`Image analysis failed: ${friendlyError(e)}`);
+      }
+    }
+    // 3) cooking reasoning in the Python Executa (reverse sampling)
+    setStatus("Cooking up an answer…");
+    const out = await callExecuta("chat", {
+      messages: historyForTool(conv), vision_context: userMsg.vision || "", mode,
+    }, 90000);
+    conv.messages.push({ id: uid(), role: "assistant", content: out?.reply || "(no answer)", mode: out?.mode, ts: Date.now() });
+    if (out?.summary) conv.summary = out.summary;
+    if (out?.title && conv.messages.filter((m) => m.role === "assistant").length === 1) {
+      conv.title = out.title;
+      if (current?.id === conv.id) $("conv-title").textContent = conv.title;
+    }
+  } catch (e) {
+    conv.messages.push({ id: uid(), role: "error", content: friendlyError(e), ts: Date.now() });
+  } finally {
+    typing.remove();
+    userMsg.images.forEach((i) => delete i.canvas); // canvases are not JSON - keep only paths
+    if (current?.id === conv.id) renderConversation();
+    if (images.length) refreshUsage();
+    // Unlock the Send button immediately so the user can keep typing/sending
+    busy = false; $("send").disabled = false; setStatus("Ready");
+    try {
+      await saveConversation(conv);
+    } catch (e) { toast(`History not saved: ${friendlyError(e)}`); }
+  }
+}
+
+// ------------------------------------------------------------------- boot
+let welcomeNode;
+function autoGrow() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(160, t.scrollHeight) + "px"; }
+
+function wireUi() {
+  welcomeNode = $("welcome");
+  $("composer").addEventListener("submit", send);
+  $("input").addEventListener("input", autoGrow);
+  $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+  $("file-input").addEventListener("change", (e) => { addFiles([...e.target.files]); e.target.value = ""; });
+  $("new-chat").onclick = newChat;
+  $("search").oninput = renderSidebar;
+  $("clear-photos").onclick = clearAllPhotos;
+  $("toggle-sidebar").onclick = () => $("app").classList.toggle("collapsed");
+  $("summarize-btn").onclick = async () => {
+    if (!current || busy) return;
+    setStatus("Summarizing…");
+    await summarize(current);
+    toast("Conversation title & summary updated!");
+    setStatus("Ready");
+  };
+  welcomeNode.querySelectorAll(".card").forEach((c) => c.addEventListener("click", () => {
+    $("input").value = c.dataset.prompt; $("mode").value = c.dataset.mode; autoGrow();
+    if (c.dataset.mode !== "general") $("file-input").click(); else $("input").focus();
+  }));
+  // Paste / drop images
+  document.addEventListener("paste", (e) => { const f = [...(e.clipboardData?.files || [])].filter((x) => x.type.startsWith("image/")); if (f.length) addFiles(f); });
+  document.addEventListener("dragover", (e) => e.preventDefault());
+  document.addEventListener("drop", (e) => { e.preventDefault(); const f = [...(e.dataTransfer?.files || [])].filter((x) => x.type.startsWith("image/")); if (f.length) addFiles(f); });
+}
 
 async function main() {
-  const status = document.getElementById("status");
-  const btn = document.getElementById("primary-btn");
-  if (!status || !btn) return;
-
-  let anna;
+  wireUi();
   try {
     anna = await AnnaAppRuntime.connect();
-  } catch (e) {
-    status.textContent = "Standalone preview (no host).";
-    return;
+  } catch {
+    setStatus("Standalone preview - open through `anna-app dev` or Anna to chat.");
+    $("send").disabled = true; renderSidebar(); return;
   }
-
-  await anna.window.set_title({ title: "my-first-anna-app" });
-  status.textContent = "Ready.";
-
-  btn.addEventListener("click", async () => {
-    status.textContent = "Running…";
-    try {
-      const out = await anna.tools.invoke({
-        tool_id: TOOL_ID,
-        method: "ping",
-        args: {},
-      });
-      await anna.storage.set({ key: "my-first-anna-app:last", value: Date.now() });
-      status.textContent = JSON.stringify(out, null, 2);
-    } catch (e) {
-      status.textContent = "Error: " + e.message;
-    }
-  });
+  try { await anna.window.set_title({ title: "Smart Kitchen Assistant" }); } catch { /* optional */ }
+  try { await loadIndex(); } catch (e) { toast(`Could not load history: ${friendlyError(e)}`); }
+  renderSidebar(); refreshUsage();
+  setStatus("Ready");
 }
 
 main();

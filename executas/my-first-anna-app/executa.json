@@ -1,0 +1,30 @@
+{
+  "slug": "smart-kitchen-assistant",
+  "name": "Smart Kitchen Assistant",
+  "version": "0.2.0",
+  "executa_type": "tool",
+  "description": "Kitchen-assistant brain for the Smart Kitchen Assistant app: recipe suggestions from ingredients, step-by-step dish tutorials and conversation summaries via host sampling/createMessage (no API key).",
+
+  "tool_id": "tool-dev-my-first-anna-app",
+  "type": "python",
+  "enabled": true,
+
+  "distribution": {
+    "active": "local",
+    "profiles": {
+      "local": {
+        "type": "local",
+        "supports_protocol": true
+      },
+      "binary": {
+        "type": "binary",
+        "executable_name": "tool-dev-my-first-anna-app",
+        "supports_protocol": true,
+        "binary_urls": {}
+      }
+    }
+  },
+
+  "_comment": "Publish metadata (slug/name/version/executa_type) is read by `anna-app apps publish`; tool_id/type/distribution drive local dev. Fill binary_urls (per-platform tar.gz/zip built with PyInstaller) before switching distribution.active to 'binary'."
+}
+

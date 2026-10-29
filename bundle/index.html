@@ -2,12 +2,72 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>my-first-anna-app</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Smart Kitchen Assistant</title>
+    <link rel="stylesheet" href="./style.css" />
     <script src="./app.js" type="module"></script>
   </head>
   <body>
-    <h1>my-first-anna-app</h1>
-    <button id="primary-btn">Run</button>
-    <pre id="status">…</pre>
+    <div id="app" class="app">
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-head">
+          <div class="brand"><span class="logo">🍳</span> Smart Kitchen</div>
+          <button id="new-chat" class="btn primary" title="Start a new conversation">+ New chat</button>
+        </div>
+        <input id="search" class="search" type="search" placeholder="Search conversations…" />
+        <ul id="conv-list" class="conv-list" aria-label="Conversation history"></ul>
+        <div class="sidebar-foot">
+          <div id="storage-usage" class="muted small">Photo storage: –</div>
+          <button id="clear-photos" class="btn danger small" title="Delete every stored photo (conversations are kept)">🗑 Clear all photos</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button id="toggle-sidebar" class="btn icon" title="Show/hide history">☰</button>
+          <div class="title-wrap">
+            <h1 id="conv-title">New conversation</h1>
+            <div id="status" class="muted small">Connecting…</div>
+          </div>
+          <button id="summarize-btn" class="btn small" title="Generate an AI summary & title via Executa" hidden>✨ Summarize</button>
+        </header>
+
+        <section id="messages" class="messages" aria-live="polite">
+          <div id="welcome" class="welcome">
+            <h2>Hi! I'm your Smart Kitchen Assistant 👩‍🍳</h2>
+            <p>Chat with me with or without photos:</p>
+            <div class="cards">
+              <button class="card" data-prompt="Here are the ingredients I have. What can I make?" data-mode="ingredients">
+                <b>🥕 What can I cook?</b><span>Snap or list your ingredients and get dish ideas.</span>
+              </button>
+              <button class="card" data-prompt="Teach me how to make this meal and list all the ingredients I need." data-mode="dish">
+                <b>🍲 Teach me this dish</b><span>Send a photo of a meal for the full recipe.</span>
+              </button>
+              <button class="card" data-prompt="What is a quick, healthy dinner I can make in 20 minutes?" data-mode="general">
+                <b>💬 Ask anything</b><span>Techniques, substitutions, timings, meal plans.</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <form id="composer" class="composer">
+          <div id="attachments" class="attachments"></div>
+          <div class="row">
+            <label class="btn icon" title="Attach photos (ingredients or a finished meal)">
+              📷<input id="file-input" type="file" accept="image/*" multiple hidden />
+            </label>
+            <select id="mode" class="mode" title="What should the assistant do?">
+              <option value="auto">Auto</option>
+              <option value="ingredients">From my ingredients</option>
+              <option value="dish">Teach this dish</option>
+              <option value="general">General question</option>
+            </select>
+            <textarea id="input" rows="1" placeholder="Ask about cooking, or attach photos…"></textarea>
+            <button id="send" class="btn primary" type="submit">Send</button>
+          </div>
+        </form>
+      </main>
+    </div>
+    <div id="toast" class="toast" hidden></div>
   </body>
 </html>

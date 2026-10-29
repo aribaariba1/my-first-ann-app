@@ -5,7 +5,10 @@
       "tool_id": "tool-dev-my-first-anna-app"
     }
   ],
-  "tags": ["my-first-anna-app"],
+  "optional_executas": [],
+  "host_capabilities": ["llm.sample", "llm.complete", "aps.kv", "aps.files"],
+  "system_prompt_addendum": "The user has the Smart Kitchen Assistant app open. It chats about cooking: it suggests dishes from photographed or listed ingredients, teaches how to cook a photographed dish (full ingredient list and steps), and keeps a conversation history in the app sidebar. Vision runs in the app via anna.llm.complete; recipe reasoning runs in the bundled Executa via sampling. You do not need to summon any windows.",
+  "tags": ["cooking", "kitchen", "recipes", "food", "vision", "assistant"],
   "ui": {
     "bundle": {
       "format": "static-spa",
@@ -15,16 +18,22 @@
     "views": [
       {
         "name": "main",
-        "title": "my-first-anna-app",
+        "title": "Smart Kitchen Assistant",
         "default": true,
-        "default_size": { "w": 480, "h": 360 },
-        "min_size": { "w": 320, "h": 240 }
+        "entry": "index.html",
+        "default_size": { "w": 980, "h": 720 },
+        "min_size": { "w": 420, "h": 520 },
+        "resizable": true,
+        "movable": true,
+        "single_instance": true
       }
     ],
     "host_api": {
       "tools": ["tool-dev-my-first-anna-app"],
-      "storage": ["get", "set"],
-      "window": ["set_title", "ready"]
+      "llm": ["complete"],
+      "storage": ["get", "set", "list", "delete"],
+      "files": ["upload_init", "upload_finalize", "download_url", "list", "delete"],
+      "window": ["set_title"]
     },
     "csp_overrides": {},
     "state_merge": "last_writer_wins"
