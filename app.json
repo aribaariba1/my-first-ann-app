@@ -1,7 +1,7 @@
 {
   "slug": "smart-kitchen-assistant",
   "name": "Smart Kitchen Assistant",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "tagline": "Snap your ingredients or a meal - get recipes and step-by-step cooking help.",
   "description": "Smart Kitchen Assistant is your AI cooking companion. Chat with or without images: photograph the ingredients you have and get dish suggestions you can make right now, or photograph a finished meal and learn exactly how to cook it with a full ingredient list and step-by-step instructions. Every conversation (including photos) is saved so you can return to it from the history sidebar, and stored photos can be cleared at any time.",
   "category": "productivity",

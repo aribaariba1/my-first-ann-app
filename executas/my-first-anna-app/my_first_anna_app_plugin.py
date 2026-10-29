@@ -28,7 +28,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 PROTOCOL_VERSION_V2 = "2.0"
 MAX_TOKENS_CAP = 8192          # host maxTokensPerCall
 MAX_SAMPLING_MESSAGES = 64     # host per-request message cap

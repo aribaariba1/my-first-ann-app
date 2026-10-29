@@ -1,7 +1,7 @@
 {
   "name": "tool-dev-my-first-anna-app",
   "display_name": "Smart Kitchen Assistant",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cooking assistant brain for the Smart Kitchen Assistant app: suggests recipes from available ingredients, teaches how to cook a pictured dish, and summarizes conversations. Uses host sampling (no API key).",
   "author": "Smart Kitchen Assistant",
   "host_capabilities": ["llm.sample"],

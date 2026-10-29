@@ -1,7 +1,7 @@
 {
   "slug": "my-first-anna-app",
   "name": "Smart Kitchen Assistant",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "executa_type": "tool",
   "description": "Kitchen-assistant brain for the Smart Kitchen Assistant app: recipe suggestions from ingredients, step-by-step dish tutorials and conversation summaries via host sampling/createMessage (no API key).",
   "manifest_file": "manifest.json",
