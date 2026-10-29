@@ -1,0 +1,7 @@
+my_first_anna_app_plugin.py
+pyproject.toml
+tool_dev_my_first_anna_app.egg-info/PKG-INFO
+tool_dev_my_first_anna_app.egg-info/SOURCES.txt
+tool_dev_my_first_anna_app.egg-info/dependency_links.txt
+tool_dev_my_first_anna_app.egg-info/entry_points.txt
+tool_dev_my_first_anna_app.egg-info/top_level.txt

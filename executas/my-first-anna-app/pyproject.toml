@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tool-dev-my-first-anna-app"
+version = "0.1.0"
+description = "Executa for the my-first-anna-app Anna App"
+requires-python = ">=3.10"
+
+[project.scripts]
+"tool-dev-my-first-anna-app" = "my_first_anna_app_plugin:main"
+
+[tool.setuptools]
+py-modules = ["my_first_anna_app_plugin"]

@@ -1,0 +1,1 @@
+my_first_anna_app_plugin

@@ -1,0 +1,2 @@
+[console_scripts]
+tool-dev-my-first-anna-app = my_first_anna_app_plugin:main
