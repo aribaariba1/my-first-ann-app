@@ -252,13 +252,14 @@ async function openConversation(id) {
     const conv = await loadConversation(id);
     if (!conv) { toast("Conversation not found."); index = index.filter((c) => c.id !== id); await saveIndex(); renderSidebar(); return; }
     current = conv; renderConversation(); renderSidebar();
-    if (window.innerWidth < 700) $("app").classList.add("collapsed");
+    if (window.innerWidth <= 700) $("app").classList.add("collapsed");
   } catch (e) { toast(friendlyError(e)); }
 }
 
 function newChat() {
   if (busy) return;
   current = null; pending = []; renderAttachments(); renderConversation(); renderSidebar();
+  if (window.innerWidth <= 700) $("app").classList.add("collapsed");
   $("input").focus();
 }
 
@@ -480,6 +481,7 @@ function autoGrow() { const t = $("input"); t.style.height = "auto"; t.style.hei
 
 function wireUi() {
   welcomeNode = $("welcome");
+  if (window.innerWidth <= 700) $("app").classList.add("collapsed");
   $("composer").addEventListener("submit", send);
   $("input").addEventListener("input", autoGrow);
   $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -488,6 +490,8 @@ function wireUi() {
   $("search").oninput = renderSidebar;
   $("clear-photos").onclick = clearAllPhotos;
   $("toggle-sidebar").onclick = () => $("app").classList.toggle("collapsed");
+  const closeBtn = $("close-sidebar");
+  if (closeBtn) closeBtn.onclick = () => $("app").classList.add("collapsed");
   $("summarize-btn").onclick = async () => {
     if (!current || busy) return;
     setStatus("Summarizing…");

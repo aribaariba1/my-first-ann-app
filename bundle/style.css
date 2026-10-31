@@ -12,6 +12,8 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   display: flex; flex-direction: column; transition: margin .2s; }
 .app.collapsed .sidebar { margin-left: -270px; }
 .sidebar-head { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.sidebar-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.close-sidebar { padding: 4px 9px; font-size: 14px; line-height: 1.2; }
 .brand { font-weight: 700; font-size: 17px; } .logo { font-size: 20px; }
 .search { margin: 0 12px 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
 .conv-list { list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; }
@@ -20,8 +22,8 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .conv-list .meta { flex: 1; min-width: 0; }
 .conv-list .t { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .conv-list .s { font-size: 12px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.conv-list .del { visibility: hidden; background: none; border: none; cursor: pointer; color: var(--danger); }
-.conv-list li:hover .del { visibility: visible; }
+.conv-list .del { visibility: visible; opacity: .75; background: none; border: none; cursor: pointer; color: var(--danger); padding: 2px 4px; flex-shrink: 0; }
+.conv-list .del:hover { opacity: 1; }
 .conv-list .empty { color: var(--muted); font-size: 13px; cursor: default; }
 .sidebar-foot { padding: 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
 
