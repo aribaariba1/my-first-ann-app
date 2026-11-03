@@ -38,7 +38,9 @@
       "window": ["set_title"]
     },
     "csp_overrides": {
-      "script-src": ["'self'"]
+      "script-src": ["'self'"],
+      "connect-src": ["'self'", "https:"],
+      "img-src": ["'self'", "data:", "blob:", "https:"]
     },
     "state_merge": "last_writer_wins"
   },

@@ -21,9 +21,44 @@
             <button id="close-sidebar" class="btn icon close-sidebar" type="button" title="Close sidebar" aria-label="Close sidebar">✕</button>
           </div>
           <button id="new-chat" class="btn primary" title="Start a new conversation">+ New chat</button>
+          <div class="nav-tabs" role="tablist" aria-label="Kitchen sections">
+            <button id="tab-chats" class="nav-tab active" data-tab="chats" type="button" role="tab" aria-selected="true">💬 Chats</button>
+            <button id="tab-cookbook" class="nav-tab" data-tab="cookbook" type="button" role="tab" aria-selected="false">📖 Cookbook <span id="cookbook-count" class="tab-badge" hidden>0</span></button>
+            <button id="tab-grocery" class="nav-tab" data-tab="grocery" type="button" role="tab" aria-selected="false">🛒 Grocery <span id="grocery-count" class="tab-badge" hidden>0</span></button>
+          </div>
         </div>
-        <input id="search" class="search" type="search" placeholder="Search conversations…" />
-        <ul id="conv-list" class="conv-list" aria-label="Conversation history"></ul>
+
+        <!-- Tab 1: Conversations -->
+        <div id="panel-chats" class="side-panel">
+          <input id="search" class="search" type="search" placeholder="Search conversations…" />
+          <ul id="conv-list" class="conv-list" aria-label="Conversation history"></ul>
+        </div>
+
+        <!-- Tab 2: Saved Recipes Cookbook -->
+        <div id="panel-cookbook" class="side-panel" hidden>
+          <input id="recipe-search" class="search" type="search" placeholder="Search saved recipes…" />
+          <ul id="recipe-list" class="conv-list" aria-label="Saved recipes"></ul>
+        </div>
+
+        <!-- Tab 3: Smart Grocery & Pantry List -->
+        <div id="panel-grocery" class="side-panel" hidden>
+          <form id="grocery-form" class="grocery-form">
+            <input id="grocery-input" type="text" placeholder="Add ingredient (e.g. 2 avocados)…" />
+            <button class="btn primary small" type="submit" title="Add item">+</button>
+          </form>
+          <div id="grocery-hint" class="grocery-hint muted small">Check off ingredients you have at home to cook with them or find substitutes for what's missing:</div>
+          <ul id="grocery-list" class="grocery-list" aria-label="Shopping list"></ul>
+          <div class="grocery-ai-actions">
+            <button id="cook-checked-grocery" class="btn primary small" type="button" title="Ask the assistant what to cook using your checked ingredients">🍳 Cook with checked</button>
+            <button id="sub-unchecked-grocery" class="btn small" type="button" title="Ask the assistant for substitutes for the unchecked (missing) ingredients">🔄 Sub missing</button>
+          </div>
+          <div class="grocery-actions">
+            <button id="copy-grocery" class="btn small" type="button" title="Copy shopping list to clipboard">📋 Copy</button>
+            <button id="clear-checked-grocery" class="btn small" type="button">✓ Clear checked</button>
+            <button id="clear-all-grocery" class="btn danger small" type="button">🗑 Clear</button>
+          </div>
+        </div>
+
         <div class="sidebar-foot">
           <div id="storage-usage" class="muted small">Photo storage: –</div>
           <button id="clear-photos" class="btn danger small" title="Delete every stored photo (conversations are kept)">🗑 Clear all photos</button>
@@ -32,18 +67,61 @@
 
       <main class="main">
         <header class="topbar">
-          <button id="toggle-sidebar" class="btn icon" title="Show/hide history">☰</button>
+          <button id="toggle-sidebar" class="btn icon" title="Show/hide sidebar">☰</button>
           <div class="title-wrap">
             <h1 id="conv-title">New conversation</h1>
             <div id="status" class="muted small">Connecting…</div>
           </div>
+          <button id="open-cookbook-btn" class="btn small" type="button" title="Open Saved Recipes Cookbook">📖 Cookbook</button>
+          <button id="toggle-timer-btn" class="btn small" type="button" title="Open Kitchen Timers">⏱️ Timers <span id="active-timers-badge" class="tab-badge" hidden>0</span></button>
           <button id="summarize-btn" class="btn small" title="Generate an AI summary & title via Executa" hidden>✨ Summarize</button>
         </header>
+
+        <!-- Collapsible Kitchen Timer Drawer -->
+        <section id="timer-drawer" class="timer-drawer" hidden aria-label="Kitchen Timers">
+          <div class="timer-drawer-head">
+            <div class="timer-title"><b>⏱️ Kitchen Timers</b> <span class="muted small">Tap any time in a recipe or start a custom timer</span></div>
+            <button id="close-timer-drawer" class="btn icon small" type="button" title="Hide timers">✕</button>
+          </div>
+          <div class="timer-controls">
+            <div class="timer-presets">
+              <button class="btn small preset-timer" type="button" data-sec="180" data-label="3 min Steep">+ 3m</button>
+              <button class="btn small preset-timer" type="button" data-sec="300" data-label="5 min Simmer">+ 5m</button>
+              <button class="btn small preset-timer" type="button" data-sec="600" data-label="10 min Boil">+ 10m</button>
+              <button class="btn small preset-timer" type="button" data-sec="900" data-label="15 min Bake">+ 15m</button>
+            </div>
+            <form id="custom-timer-form" class="custom-timer-form">
+              <input id="timer-label-input" type="text" placeholder="Label (e.g. Simmer sauce)" />
+              <input id="timer-mins-input" type="number" min="1" max="360" value="8" title="Minutes" />
+              <span class="small muted">min</span>
+              <button class="btn primary small" type="submit">Start</button>
+            </form>
+          </div>
+          <div id="timer-list" class="timer-list"></div>
+        </section>
+
+        <!-- Recipe Detail Modal / View -->
+        <section id="recipe-viewer" class="recipe-viewer" hidden aria-label="Saved Recipe View">
+          <div class="recipe-viewer-head">
+            <div class="recipe-viewer-titles">
+              <span id="recipe-viewer-badge" class="badge">📖 Saved Recipe</span>
+              <h2 id="recipe-viewer-title">Recipe Title</h2>
+              <div id="recipe-viewer-meta" class="muted small"></div>
+            </div>
+            <div class="recipe-viewer-actions">
+              <button id="recipe-extract-grocery" class="btn small" type="button" title="Extract ingredients to your Grocery List">🛒 Add ingredients to Grocery</button>
+              <button id="recipe-extract-timers" class="btn small" type="button" title="Detect cooking times and create timers">⏱️ Find Timers</button>
+              <button id="recipe-cook-chat" class="btn primary small" type="button" title="Ask follow-up questions about this recipe">💬 Ask Assistant</button>
+              <button id="close-recipe-viewer" class="btn icon small" type="button" title="Back to chat">✕</button>
+            </div>
+          </div>
+          <div id="recipe-viewer-body" class="recipe-viewer-body"></div>
+        </section>
 
         <section id="messages" class="messages" aria-live="polite">
           <div id="welcome" class="welcome">
             <h2>Hi! I'm your Smart Kitchen Assistant 👩‍🍳</h2>
-            <p>Chat with me with or without photos:</p>
+            <p>Chat with me with or without photos — plus save recipes to your <b>📖 Cookbook</b>, build your <b>🛒 Grocery List</b>, and run <b>⏱️ Kitchen Timers</b>:</p>
             <div class="cards">
               <button class="card" data-prompt="Here are the ingredients I have. What can I make?" data-mode="ingredients">
                 <b>🥕 What can I cook?</b><span>Snap or list your ingredients and get dish ideas.</span>

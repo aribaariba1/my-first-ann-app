@@ -1,9 +1,10 @@
 // Smart Kitchen Assistant - Anna App bundle (plain ES modules, no build step).
 //
 // Responsibilities split (see README):
-//   * iframe (this file): chat UI, history sidebar, photo handling,
+//   * iframe (this file): chat UI, history sidebar, Saved Recipes Cookbook,
+//     Smart Grocery List, Interactive Kitchen Timers, photo handling,
 //     vision step via anna.llm.complete (image blocks), persistence via
-//     anna.storage (conversations) + anna.files (photos).
+//     anna.storage (conversations, cookbook, grocery list) + anna.files (photos).
 //   * Python Executa (tool-dev-my-first-anna-app): cooking reasoning and
 //     conversation summaries via reverse sampling/createMessage.
 import { AnnaAppRuntime } from "/static/anna-apps/_sdk/latest/index.js";
@@ -23,6 +24,9 @@ const TOOL_ID =
   DEV_FALLBACK_TOOL_ID;
 const INDEX_KEY = "convs/index";
 const convKey = (id) => `convs/${id}`;
+const RECIPES_INDEX_KEY = "recipes/index";
+const recipeKey = (id) => `recipes/${id}`;
+const GROCERY_KEY = "grocery/list";
 const IMAGE_PREFIX = "images/";
 const KV_IMAGE_PREFIX = "images_kv/";
 const DEFAULT_PHOTO_PROMPT = "Here is a photo. Please help me.";
@@ -42,8 +46,14 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 let anna = null;
 let index = [];            // [{id,title,summary,updated_at,image_count}]
 let current = null;        // full conversation object
+let recipesIndex = [];     // [{id,title,mode,summary,created_at,conv_id}]
+let activeRecipe = null;   // full recipe object currently shown in #recipe-viewer
+let groceryList = [];      // [{id,text,recipeTitle,checked}]
+let timers = [];           // [{id,label,totalSec,remainSec,running,done}]
+let timerInterval = null;
 let pending = [];          // prepared images waiting to be sent
 let busy = false;
+let activeTab = "chats";   // "chats" | "cookbook" | "grocery"
 const urlCache = new Map(); // path -> {url, exp}
 
 // ------------------------------------------------------------------ utils
@@ -81,7 +91,7 @@ async function callExecuta(method, args, timeoutMs = 90000) {
   return unwrapTool(res);
 }
 
-async function confirmBox(text) {
+async function confirmBox(text, yesLabel = "Delete") {
   // window.confirm is unavailable in sandboxed iframes without allow-modals.
   return new Promise((resolve) => {
     const wrap = el("div", "", "");
@@ -90,7 +100,7 @@ async function confirmBox(text) {
     box.style.cssText = "background:#fff;padding:18px;border-radius:12px;max-width:340px;font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.2)";
     box.append(el("p", "", "")); box.firstChild.textContent = text;
     const row = el("div", "", ""); row.style.cssText = "display:flex;gap:8px;justify-content:flex-end";
-    const no = el("button", "btn", "Cancel"), yes = el("button", "btn primary", "Delete");
+    const no = el("button", "btn", "Cancel"), yes = el("button", "btn primary", yesLabel);
     no.type = yes.type = "button";
     const done = (v) => { wrap.remove(); resolve(v); };
     no.onclick = () => done(false); yes.onclick = () => done(true);
@@ -138,30 +148,32 @@ async function saveConversation(conv) {
 async function uploadImage(img, path) {
   try {
     const init = await anna.files.upload_init({ path, content_type: img.mimeType, size: img.size });
-    const res = await fetch(init.put_url, { method: "PUT", headers: { "Content-Type": img.mimeType, ...(init.headers || {}) }, body: img.blob });
+    const putHeaders = init.headers && Object.keys(init.headers).length ? init.headers : { "Content-Type": img.mimeType };
+    const res = await fetch(init.put_url, { method: "PUT", headers: putHeaders, body: img.blob });
     if (!res.ok) throw new Error(`upload failed (${res.status})`);
-    const etag = res.headers.get("ETag") || undefined;
-    await anna.files.upload_finalize({ path, size: img.size, ...(etag ? { etag } : {}) });
+    const rawEtag = res.headers.get("ETag") || res.headers.get("etag") || "";
+    const etag = rawEtag ? rawEtag.replace(/^"|"$/g, "") : undefined;
+    await anna.files.upload_finalize({ path, size: img.size, size_bytes: img.size, ...(etag ? { etag } : {}) });
     return path;
   } catch (e) {
-    if (/not_implemented|endpoint not yet available/i.test(String(e?.code || e?.message))) {
-      const kvKey = `${KV_IMAGE_PREFIX}${path.slice(IMAGE_PREFIX.length)}`;
-      const b64 = img.thumbBase64 || img.base64;
-      const sz = img.thumbSize || img.size;
-      const payload = { mimeType: img.mimeType, base64: b64, size: sz, ts: Date.now() };
-      try {
+    // Resilient fallback: if presigned R2 upload fails for ANY reason
+    // (CSP/CORS/network/not_implemented), store compact thumbnail in KV storage
+    // so the user's photo is always saved cleanly without "Failed to fetch".
+    const kvKey = `${KV_IMAGE_PREFIX}${path.slice(IMAGE_PREFIX.length)}`;
+    const b64 = img.thumbBase64 || img.base64;
+    const sz = img.thumbSize || img.size;
+    const payload = { mimeType: img.mimeType, base64: b64, size: sz, ts: Date.now() };
+    try {
+      await anna.storage.set({ key: kvKey, value: payload, metadata: { size_bytes: sz } });
+    } catch (kvErr) {
+      if (/too_large|quota_exceeded|value_too_large/i.test(String(kvErr?.code || kvErr?.message))) {
+        await evictOldestKvImages(2);
         await anna.storage.set({ key: kvKey, value: payload, metadata: { size_bytes: sz } });
-      } catch (kvErr) {
-        if (/too_large|quota_exceeded|value_too_large/i.test(String(kvErr?.code || kvErr?.message))) {
-          await evictOldestKvImages(1);
-          await anna.storage.set({ key: kvKey, value: payload, metadata: { size_bytes: sz } });
-        } else {
-          throw kvErr;
-        }
+      } else {
+        throw kvErr;
       }
-      return `kv:${kvKey}`;
     }
-    throw e;
+    return `kv:${kvKey}`;
   }
 }
 
@@ -226,14 +238,27 @@ async function refreshUsage() {
   $("storage-usage").textContent = `Photo storage: ${count} photo${count === 1 ? "" : "s"} · ${formatBytes(total)}`;
 }
 
-// ---------------------------------------------------------------- sidebar
+// ------------------------------------------------ navigation tabs & sidebar
+function switchTab(tab) {
+  activeTab = tab;
+  ["chats", "cookbook", "grocery"].forEach((t) => {
+    const btn = $(`tab-${t}`);
+    const panel = $(`panel-${t}`);
+    if (btn) {
+      btn.classList.toggle("active", t === tab);
+      btn.setAttribute("aria-selected", t === tab ? "true" : "false");
+    }
+    if (panel) panel.hidden = t !== tab;
+  });
+}
+
 function renderSidebar() {
   const list = $("conv-list"); list.innerHTML = "";
   const q = $("search").value.trim().toLowerCase();
   const items = index.filter((c) => !q || `${c.title} ${c.summary}`.toLowerCase().includes(q));
   if (!items.length) { list.append(el("li", "empty", q ? "No matches." : "No conversations yet.")); return; }
   for (const c of items) {
-    const li = el("li", current?.id === c.id ? "active" : "");
+    const li = el("li", !activeRecipe && current?.id === c.id ? "active" : "");
     const meta = el("div", "meta");
     const t = el("div", "t"); t.textContent = (c.image_count ? "📷 " : "") + (c.title || "Untitled");
     const s = el("div", "s"); s.textContent = c.summary || new Date(c.updated_at).toLocaleString();
@@ -251,6 +276,7 @@ async function openConversation(id) {
   try {
     const conv = await loadConversation(id);
     if (!conv) { toast("Conversation not found."); index = index.filter((c) => c.id !== id); await saveIndex(); renderSidebar(); return; }
+    closeRecipeViewer();
     current = conv; renderConversation(); renderSidebar();
     if (isMobileViewport()) $("app").classList.add("collapsed");
   } catch (e) { toast(friendlyError(e)); }
@@ -258,7 +284,9 @@ async function openConversation(id) {
 
 function newChat() {
   if (busy) return;
+  closeRecipeViewer();
   current = null; pending = []; renderAttachments(); renderConversation(); renderSidebar();
+  switchTab("chats");
   if (isMobileViewport()) $("app").classList.add("collapsed");
   $("input").focus();
 }
@@ -315,6 +343,633 @@ async function deleteSingleImage(msg, img) {
   } catch (e) { toast(friendlyError(e)); }
 }
 
+// ------------------------------------ Feature 1: Saved Recipes Cookbook
+function extractRecipeTitle(markdown, fallbackTitle = "Saved Recipe") {
+  const lines = String(markdown || "").split(/\r?\n/);
+  for (const raw of lines) {
+    const m = raw.match(/^#{1,3}\s+(.+)$/);
+    if (m) {
+      const clean = m[1].replace(/[*_`~]/g, "").trim();
+      if (clean && !/^(ingredients|instructions|steps|directions|tips|notes|method|what you need)$/i.test(clean)) {
+        return clean.slice(0, 64);
+      }
+    }
+  }
+  for (const raw of lines) {
+    const bold = raw.match(/^\*\*(.+?)\*\*/);
+    if (bold && bold[1].length > 3 && bold[1].length < 64) return bold[1].trim();
+  }
+  return (fallbackTitle || "Saved Recipe").slice(0, 64);
+}
+
+function extractRecipeSummary(markdown) {
+  const lines = String(markdown || "")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^#{1,6}\s+/, "").replace(/[*_`~>-]/g, "").trim())
+    .filter((l) => l.length > 20);
+  return (lines[0] || "Saved kitchen recipe").slice(0, 110);
+}
+
+async function loadCookbook() {
+  if (!anna) return;
+  const r = await anna.storage.get({ key: RECIPES_INDEX_KEY });
+  recipesIndex = Array.isArray(r?.value) ? r.value : [];
+  renderCookbookList();
+}
+
+async function saveCookbookIndex() {
+  if (!anna) return;
+  await setKvWithSpaceGuard(RECIPES_INDEX_KEY, recipesIndex);
+  renderCookbookList();
+}
+
+async function saveRecipeFromMessage(m) {
+  if (!anna) return;
+  const existing = recipesIndex.find((r) => r.msg_id && r.msg_id === m.id);
+  if (existing) {
+    switchTab("cookbook");
+    $("app").classList.remove("collapsed");
+    openSavedRecipe(existing.id);
+    toast("Already in your Cookbook!");
+    return;
+  }
+  const title = extractRecipeTitle(m.content, current?.title || "Kitchen Recipe");
+  const summary = extractRecipeSummary(m.content);
+  const recipe = {
+    id: uid(),
+    msg_id: m.id,
+    conv_id: current?.id || null,
+    title,
+    mode: m.mode || "dish",
+    summary,
+    content: m.content,
+    created_at: new Date().toISOString(),
+  };
+  try {
+    await setKvWithSpaceGuard(recipeKey(recipe.id), recipe, { tags: ["recipe"] });
+    const entry = {
+      id: recipe.id,
+      msg_id: recipe.msg_id,
+      conv_id: recipe.conv_id,
+      title: recipe.title,
+      mode: recipe.mode,
+      summary: recipe.summary,
+      created_at: recipe.created_at,
+    };
+    recipesIndex = [entry, ...recipesIndex.filter((r) => r.id !== recipe.id)];
+    await saveCookbookIndex();
+    if (current) renderConversation();
+    toast(`Saved "${recipe.title}" to your Cookbook!`);
+  } catch (e) {
+    toast(`Could not save recipe: ${friendlyError(e)}`);
+  }
+}
+
+function renderCookbookList() {
+  const badge = $("cookbook-count");
+  if (badge) {
+    badge.textContent = String(recipesIndex.length);
+    badge.hidden = recipesIndex.length === 0;
+  }
+  const list = $("recipe-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const q = ($("recipe-search")?.value || "").trim().toLowerCase();
+  const items = recipesIndex.filter((r) => !q || `${r.title} ${r.summary}`.toLowerCase().includes(q));
+  if (!items.length) {
+    list.append(el("li", "empty", q ? "No matching recipes." : "No saved recipes yet. Click “📖 Save to Cookbook” under any assistant recipe!"));
+    return;
+  }
+  const modeIcon = { ingredients: "🥕", dish: "🍲", general: "📖" };
+  for (const r of items) {
+    const li = el("li", activeRecipe?.id === r.id ? "active" : "");
+    const meta = el("div", "meta");
+    const t = el("div", "t");
+    t.textContent = `${modeIcon[r.mode] || "📖"} ${r.title || "Saved Recipe"}`;
+    const s = el("div", "s");
+    s.textContent = r.summary || new Date(r.created_at).toLocaleDateString();
+    meta.append(t, s);
+    const del = el("button", "del", "🗑");
+    del.title = "Remove recipe from Cookbook";
+    del.onclick = (ev) => { ev.stopPropagation(); deleteSavedRecipe(r.id); };
+    li.append(meta, del);
+    li.onclick = () => openSavedRecipe(r.id);
+    list.append(li);
+  }
+}
+
+async function openSavedRecipe(id) {
+  if (!anna) return;
+  try {
+    const r = await anna.storage.get({ key: recipeKey(id) });
+    const recipe = r?.value;
+    if (!recipe) {
+      toast("Recipe not found.");
+      recipesIndex = recipesIndex.filter((x) => x.id !== id);
+      await saveCookbookIndex();
+      return;
+    }
+    activeRecipe = recipe;
+    $("recipe-viewer-title").textContent = recipe.title;
+    const badgeLabels = { ingredients: "🥕 From your ingredients", dish: "🍲 Dish tutorial", general: "📖 Saved Recipe" };
+    $("recipe-viewer-badge").textContent = badgeLabels[recipe.mode] || "📖 Saved Recipe";
+    $("recipe-viewer-meta").textContent = `Saved on ${new Date(recipe.created_at).toLocaleString()}`;
+    $("recipe-viewer-body").innerHTML = renderMarkdown(recipe.content);
+    $("messages").hidden = true;
+    $("recipe-viewer").hidden = false;
+    renderCookbookList();
+    renderSidebar();
+    if (isMobileViewport()) $("app").classList.add("collapsed");
+  } catch (e) {
+    toast(friendlyError(e));
+  }
+}
+
+function closeRecipeViewer() {
+  activeRecipe = null;
+  if ($("recipe-viewer")) $("recipe-viewer").hidden = true;
+  if ($("messages")) $("messages").hidden = false;
+  renderCookbookList();
+  renderSidebar();
+}
+
+async function deleteSavedRecipe(id) {
+  if (!(await confirmBox("Remove this recipe from your Cookbook?"))) return;
+  try {
+    await anna.storage.delete({ key: recipeKey(id) });
+    recipesIndex = recipesIndex.filter((r) => r.id !== id);
+    await saveCookbookIndex();
+    if (activeRecipe?.id === id) closeRecipeViewer();
+    if (current) renderConversation();
+    toast("Recipe removed from Cookbook.");
+  } catch (e) {
+    toast(friendlyError(e));
+  }
+}
+
+// ------------------------------------ Feature 2: Smart Grocery List
+function parseIngredientLine(rawItem) {
+  let line = String(rawItem || "").replace(/[*_`~]/g, "").trim();
+  if (!line || line.endsWith(":")) return [];
+
+  // 1. Handle "Label: rest" or "Label — rest"
+  let fallbackLabel = "";
+  const colonMatch = line.match(/^([A-Za-z][A-Za-z0-9\s/&()-]{1,26})(?::|\s+—\s+|\s+-\s+)(.+)$/);
+  if (colonMatch) {
+    const label = colonMatch[1].trim();
+    const rest = colonMatch[2].trim();
+    if (/^(total time|prep time|cook time|servings|yield|the secret|variations?|safety note|tip|note|step \d+|equipment|tools)/i.test(label)) {
+      return [];
+    }
+    if (!/^(ground meat|meat|protein|aromatics|liquid|produce|dairy|vegetables?|herbs?\/?spices?|seasoning\s*&?\s*oil|seasoning|garnish|base|pasta\s*&?\s*garnish|pasta|sauce|cheese|herbs?|oil|tomato base|rice)$/i.test(label)) {
+      fallbackLabel = label;
+    }
+    line = rest;
+  }
+
+  // 2. Strip parenthetical notes e.g. (1 lb), (finely diced), (or a mix of...)
+  line = line.replace(/\([^)]*\)/g, " ");
+
+  // 3. Remove trailing prep instructions after commas before splitting
+  line = line.replace(/,\s*(?:finely |roughly |thinly |freshly |lightly )?(?:minced|diced|chopped|sliced|grated|beaten|crushed|peeled|halved|trimmed|melted|softened|chilled|cooked|divided|to taste|for garnish|for serving|optional|if desired|as needed)\b[^,]*/gi, "");
+
+  // 4. Split compound ingredients separated by commas or " and "
+  const parts = line.split(/,|(?:\s+and\s+)/i);
+  const results = [];
+
+  for (let p of parts) {
+    p = p.trim();
+    // Strip leading numbers, fractions, ranges, units, sizes, and prep words
+    p = p.replace(/^(?:approx\.?\s*)?(?:[\d½⅓⅔¼¾⅛]+\s*(?:[-–/]\s*[\d½⅓⅔¼¾⅛]+)?\s*)+/i, "");
+    p = p.replace(/^(?:g|kg|mg|ml|l|oz|lbs?|cups?|tbsp|tablespoons?|tsp|teaspoons?|cloves?|stalks?|sprigs?|bunch(?:es)?|pinch(?:es)?|dash(?:es)?|cans?|jars?|packs?|packages?|slices?|pieces?|heads?|bulbs?)\b\.?\s*(?:of\s+)?/i, "");
+    p = p.replace(/^(?:small|medium|large|extra-large|whole|half|fresh|freshly|dried|canned|frozen|cooked|raw|boneless|skinless|lean|finely|roughly|thinly|lightly|grated|minced|diced|chopped|sliced|crushed|beaten|peeled|chilled|day-old)\b\s*/gi, "");
+    p = p.replace(/^(?:small|medium|large|whole|fresh|freshly|cooked|finely|roughly|thinly|lightly|grated|minced|diced|chopped|sliced|beaten|peeled|chilled|day-old)\b\s*/gi, "");
+
+    // Strip trailing "for ...", "to taste...", "or ..." alternatives
+    p = p.replace(/(?:^|\s+)(?:for\s+(?:richness|garnish|serving|frying|cooking|sauce|topping|flavor|flavour|dusting)|to\s+taste|as\s+needed|if\s+desired|plus\s+more.*|or\s+.+)$/i, "");
+    p = p.replace(/(?:^|\s+)\b(?:minced|diced|chopped|sliced|grated|beaten|peeled|halved|trimmed|to taste|stalks?|leaves?)\b.*$/i, "");
+    p = p.replace(/[.;:]+$/, "").trim();
+
+    if (!p && fallbackLabel) p = fallbackLabel;
+    if (!p || p.length < 2 || p.length > 50) continue;
+    if (/^(?:large |small |medium |wide )?(?:wok|skillet|pan|pot|dutch oven|knife|cutting board|wooden spoon|spoon|spatula|colander|bowl|whisk|tongs|baking sheet|oven|blender)\b/i.test(p)) continue;
+    if (/^(?:taste|richness|garnish|serving|optional)$/i.test(p)) continue;
+
+    p = p.charAt(0).toUpperCase() + p.slice(1);
+    results.push(p);
+  }
+
+  if (!results.length && fallbackLabel) {
+    results.push(fallbackLabel.charAt(0).toUpperCase() + fallbackLabel.slice(1));
+  }
+  return results;
+}
+
+function extractIngredientsFromMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const extracted = [];
+  const seen = new Set();
+  let inIngredientsSection = false;
+
+  const pushUnique = (items) => {
+    for (const item of items) {
+      const k = item.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        extracted.push(item);
+      }
+    }
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    const heading = line.match(/^#{1,4}\s+(.+)$/) || line.match(/^\*\*(.+?)\*\*:?$/);
+    if (heading) {
+      const hText = heading[1].replace(/[*_`~]/g, "").trim().toLowerCase();
+      if (/^(ingredients?|what you('ll)? need|shopping list|you will need|for the )/i.test(hText)) {
+        inIngredientsSection = true;
+        continue;
+      } else if (/^(equipment|tools|utensils|instructions?|steps?|directions?|method|how to|preparation|timing|tips?|notes?|serving|nutrition|variations?|storage)/i.test(hText)) {
+        inIngredientsSection = false;
+        continue;
+      }
+    }
+    const bullet = line.match(/^[-*•+]\s+(.+)$/);
+    if (bullet && inIngredientsSection) {
+      pushUnique(parseIngredientLine(bullet[1]));
+    }
+  }
+
+  // Fallback: if no explicit "Ingredients" heading was matched, collect bullet lines that look like ingredients
+  if (!extracted.length) {
+    for (const raw of lines) {
+      const bullet = raw.trim().match(/^[-*•]\s+(.+)$/);
+      if (bullet && !/^(step \d|preheat|heat|cook|bake|simmer|boil|serve)/i.test(bullet[1])) {
+        pushUnique(parseIngredientLine(bullet[1]));
+      }
+    }
+  }
+  return extracted.slice(0, 35);
+}
+
+async function loadGroceryList() {
+  if (!anna) return;
+  const r = await anna.storage.get({ key: GROCERY_KEY });
+  const rawList = Array.isArray(r?.value) ? r.value : [];
+  groceryList = [];
+  const seen = new Set();
+  let cleanedAny = false;
+  for (const g of rawList) {
+    const parsedItems = parseIngredientLine(g.text);
+    if (!parsedItems.length) {
+      cleanedAny = true;
+      continue;
+    }
+    if (parsedItems.length !== 1 || parsedItems[0] !== g.text) cleanedAny = true;
+    for (const name of parsedItems) {
+      const key = name.toLowerCase();
+      if (seen.has(key)) {
+        cleanedAny = true;
+        continue;
+      }
+      seen.add(key);
+      groceryList.push({
+        id: parsedItems.length === 1 ? g.id : uid(),
+        text: name,
+        recipeTitle: g.recipeTitle || "",
+        checked: !!g.checked,
+      });
+    }
+  }
+  renderGroceryList();
+  if (cleanedAny) {
+    try { await setKvWithSpaceGuard(GROCERY_KEY, groceryList); } catch { /* ignore */ }
+  }
+}
+
+async function saveGroceryList() {
+  renderGroceryList();
+  if (!anna) return;
+  try {
+    await setKvWithSpaceGuard(GROCERY_KEY, groceryList);
+  } catch (e) {
+    toast(`Could not save grocery list: ${friendlyError(e)}`);
+  }
+}
+
+async function addIngredientsFromText(markdown, recipeTitle = "") {
+  const items = extractIngredientsFromMarkdown(markdown);
+  if (!items.length) {
+    toast("No bulleted ingredients detected in this message. You can add items manually in the 🛒 Grocery tab.");
+    return;
+  }
+  const existingTexts = new Set(groceryList.map((g) => g.text.toLowerCase()));
+  let added = 0;
+  for (const text of items) {
+    if (!existingTexts.has(text.toLowerCase())) {
+      groceryList.push({ id: uid(), text, recipeTitle, checked: false });
+      existingTexts.add(text.toLowerCase());
+      added++;
+    }
+  }
+  await saveGroceryList();
+  switchTab("grocery");
+  $("app").classList.remove("collapsed");
+  toast(added ? `Added ${added} ingredient${added === 1 ? "" : "s"} to your 🛒 Grocery List!` : "All ingredients are already in your Grocery List!");
+}
+
+function renderGroceryList() {
+  const checkedItems = groceryList.filter((g) => g.checked);
+  const uncheckedItems = groceryList.filter((g) => !g.checked);
+  const badge = $("grocery-count");
+  if (badge) {
+    badge.textContent = String(uncheckedItems.length);
+    badge.hidden = uncheckedItems.length === 0;
+  }
+  const cookBtn = $("cook-checked-grocery");
+  if (cookBtn) {
+    cookBtn.textContent = checkedItems.length ? `🍳 Cook with checked (${checkedItems.length})` : "🍳 Cook with checked";
+    cookBtn.disabled = checkedItems.length === 0;
+  }
+  const subBtn = $("sub-unchecked-grocery");
+  if (subBtn) {
+    subBtn.textContent = uncheckedItems.length ? `🔄 Sub missing (${uncheckedItems.length})` : "🔄 Sub missing";
+    subBtn.disabled = uncheckedItems.length === 0;
+  }
+
+  const list = $("grocery-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!groceryList.length) {
+    list.append(el("li", "empty", "Your grocery list is empty. Extract ingredients from any recipe or add items above!"));
+    return;
+  }
+  for (const item of groceryList) {
+    const li = el("li", item.checked ? "checked" : "");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!item.checked;
+    cb.title = item.checked ? "Checked: you have this ingredient ready" : "Check if you have this ingredient";
+    cb.onchange = () => {
+      item.checked = cb.checked;
+      saveGroceryList();
+    };
+    const txtWrap = el("div", "item-text");
+    const nameEl = el("div", "item-name");
+    nameEl.textContent = (item.checked ? "✓ " : "") + item.text;
+    txtWrap.append(nameEl);
+    if (item.recipeTitle) {
+      const sub = el("div", "item-sub");
+      sub.textContent = `${item.checked ? "Ready in kitchen · " : "Need for: "}${item.recipeTitle}`;
+      txtWrap.append(sub);
+    }
+    txtWrap.onclick = () => {
+      item.checked = !item.checked;
+      saveGroceryList();
+    };
+    const del = el("button", "del", "✕");
+    del.type = "button";
+    del.title = "Remove item";
+    del.onclick = () => {
+      groceryList = groceryList.filter((g) => g.id !== item.id);
+      saveGroceryList();
+    };
+    li.append(cb, txtWrap, del);
+    list.append(li);
+  }
+}
+
+function askAssistantPrompt(promptText, mode = "general") {
+  closeRecipeViewer();
+  if (isMobileViewport()) $("app").classList.add("collapsed");
+  $("mode").value = mode;
+  $("input").value = promptText;
+  autoGrow();
+  send();
+}
+
+// ------------------------------------ Feature 3: Interactive Kitchen Timers
+let sharedAudioCtx = null;
+function unlockAudio() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!sharedAudioCtx) sharedAudioCtx = new AudioCtx();
+    if (sharedAudioCtx.state === "suspended") sharedAudioCtx.resume();
+    return sharedAudioCtx;
+  } catch {
+    return null;
+  }
+}
+
+function extractTimersFromMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const regex = /\b(\d{1,3})(?:\s*(?:-|to|–)\s*(\d{1,3}))?\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b/gi;
+  const results = [];
+  const seenSec = new Set();
+
+  for (const rawLine of lines) {
+    const cleanLine = rawLine.replace(/^[-*•#\d.)\s]+/, "").replace(/[*_`~]/g, "").trim();
+    if (!cleanLine || /^(servings|prep time|total time)/i.test(cleanLine)) continue;
+    let match;
+    regex.lastIndex = 0;
+    while ((match = regex.exec(cleanLine)) !== null) {
+      const n1 = parseInt(match[1], 10);
+      const n2 = match[2] ? parseInt(match[2], 10) : n1;
+      const unit = match[3].toLowerCase();
+      const val = Math.round((n1 + n2) / 2);
+      let sec = val * 60;
+      if (unit.startsWith("h")) sec = val * 3600;
+      else if (unit.startsWith("s")) sec = val;
+      if (sec < 10 || sec > 12 * 3600 || seenSec.has(sec)) continue;
+      seenSec.add(sec);
+
+      const unitShort = unit.startsWith("h") ? `${val}h` : unit.startsWith("s") ? `${val}s` : `${val}m`;
+      const stepTitleMatch = cleanLine.match(/^([A-Za-z][A-Za-z0-9\s&'-]{2,28}):\s*(.+)$/);
+      const shortStep = stepTitleMatch
+        ? stepTitleMatch[1].trim()
+        : cleanLine.split(/[.:;]/)[0].split(/\s+/).slice(0, 5).join(" ");
+      const label = shortStep ? `${shortStep} (${unitShort})` : `${unitShort} Timer`;
+      results.push({ sec, label, shortLabel: unitShort, stepDetail: cleanLine.slice(0, 140) });
+      if (results.length >= 4) return results;
+    }
+  }
+  return results;
+}
+
+function formatTimerClock(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const rem = s % 60;
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+  }
+  return `${String(mins).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+}
+
+function playTimerChime() {
+  try {
+    const ctx = unlockAudio();
+    if (!ctx) return;
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.24, ctx.currentTime + idx * 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.15 + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + idx * 0.15);
+      osc.stop(ctx.currentTime + idx * 0.15 + 0.36);
+    });
+  } catch { /* audio optional */ }
+}
+
+function ensureTimerTicker() {
+  if (timerInterval) return;
+  timerInterval = setInterval(() => {
+    let anyChanged = false;
+    let ringingCount = 0;
+    for (const t of timers) {
+      if (t.running && t.remainSec > 0) {
+        t.remainSec -= 1;
+        anyChanged = true;
+        if (t.remainSec <= 0) {
+          t.remainSec = 0;
+          t.running = false;
+          t.done = true;
+          t.alarmTicks = 0;
+          playTimerChime();
+          toast(`🔔 Timer finished: ${t.label}! Click "👩‍🍳 Next step?" to continue cooking.`, 7000);
+          $("timer-drawer").hidden = false;
+        }
+      } else if (t.done && !t.silenced) {
+        t.alarmTicks = (t.alarmTicks || 0) + 1;
+        ringingCount++;
+        // Repeat kitchen chime every 3 seconds (up to 6 times) until user clicks Stop or Next step
+        if (t.alarmTicks % 3 === 0 && t.alarmTicks <= 18) {
+          playTimerChime();
+        }
+      }
+    }
+    if (anyChanged || ringingCount > 0) renderTimers();
+  }, 1000);
+}
+
+function startKitchenTimer(sec, label = "Kitchen Timer", stepDetail = "") {
+  unlockAudio();
+  const cleanSec = Math.max(5, Math.round(Number(sec) || 60));
+  timers.unshift({
+    id: uid(),
+    label: label || `${Math.round(cleanSec / 60)}m Timer`,
+    stepDetail: stepDetail || label,
+    totalSec: cleanSec,
+    remainSec: cleanSec,
+    running: true,
+    done: false,
+    silenced: false,
+    alarmTicks: 0,
+  });
+  $("timer-drawer").hidden = false;
+  ensureTimerTicker();
+  renderTimers();
+  toast(`⏱️ Started timer: ${label}`);
+}
+
+function renderTimers() {
+  const activeCount = timers.filter((t) => t.running || t.done).length;
+  const badge = $("active-timers-badge");
+  if (badge) {
+    badge.textContent = String(activeCount);
+    badge.hidden = activeCount === 0;
+  }
+  const runningTimers = timers.filter((t) => t.running);
+  if (!busy && runningTimers.length > 0) {
+    const nextUp = runningTimers.slice().sort((a, b) => a.remainSec - b.remainSec)[0];
+    setStatus(`⏱️ ${formatTimerClock(nextUp.remainSec)} — ${nextUp.label}`);
+  } else if (!busy && $("status")?.textContent?.startsWith("⏱️")) {
+    setStatus("Ready");
+  }
+
+  const box = $("timer-list");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!timers.length) {
+    box.append(el("div", "muted small", "No active timers. Use the quick buttons above or tap any detected timer under a recipe."));
+    return;
+  }
+  for (const t of timers) {
+    const chip = el("div", `timer-chip${t.running ? " running" : ""}${t.done ? " done" : ""}`);
+    const timeEl = el("span", "timer-time", t.done ? "🔔 DONE!" : formatTimerClock(t.remainSec));
+    const lblEl = el("span", "timer-label");
+    lblEl.textContent = t.label;
+    lblEl.title = t.stepDetail || t.label;
+
+    chip.append(timeEl, lblEl);
+
+    if (t.done) {
+      const nextStepBtn = el("button", "btn primary small", "👩‍🍳 Next step?");
+      nextStepBtn.type = "button";
+      nextStepBtn.title = "Ask the assistant what to check & do next in your recipe";
+      nextStepBtn.onclick = () => {
+        t.silenced = true;
+        timers = timers.filter((x) => x.id !== t.id);
+        renderTimers();
+        askAssistantPrompt(
+          `My kitchen timer "${t.label}"${t.stepDetail && t.stepDetail !== t.label ? ` (for step: "${t.stepDetail}")` : ""} just finished! How do I tell if it's ready, and what is my immediate next step?`,
+          "general"
+        );
+      };
+      chip.append(nextStepBtn);
+    } else {
+      const plusOneBtn = el("button", "btn small", "+1m");
+      plusOneBtn.type = "button";
+      plusOneBtn.title = "Add 1 minute";
+      plusOneBtn.onclick = () => {
+        unlockAudio();
+        t.remainSec += 60;
+        t.totalSec += 60;
+        renderTimers();
+      };
+      chip.append(plusOneBtn);
+    }
+
+    const toggleBtn = el("button", "btn small", t.done ? "↻" : t.running ? "⏸" : "▶");
+    toggleBtn.type = "button";
+    toggleBtn.title = t.done ? "Restart timer" : t.running ? "Pause timer" : "Resume timer";
+    toggleBtn.onclick = () => {
+      unlockAudio();
+      if (t.done) {
+        t.remainSec = t.totalSec;
+        t.done = false;
+        t.silenced = false;
+        t.running = true;
+      } else {
+        t.running = !t.running;
+      }
+      renderTimers();
+    };
+
+    const delBtn = el("button", "btn icon small", "✕");
+    delBtn.type = "button";
+    delBtn.title = "Dismiss timer";
+    delBtn.onclick = () => {
+      t.silenced = true;
+      timers = timers.filter((x) => x.id !== t.id);
+      renderTimers();
+    };
+
+    const pct = t.totalSec > 0 ? Math.max(0, Math.min(100, ((t.totalSec - t.remainSec) / t.totalSec) * 100)) : 100;
+    const prog = el("div", "timer-progress");
+    prog.style.width = `${pct.toFixed(1)}%`;
+
+    chip.append(toggleBtn, delBtn, prog);
+    box.append(chip);
+  }
+}
+
 // ------------------------------------------------------------------- chat
 function thumbFor(img, msg) {
   const box = el("div", "thumb");
@@ -343,6 +998,34 @@ function renderMessage(m) {
   } else if (m.role === "assistant") {
     if (m.mode) div.append(el("span", "badge", { ingredients: "🥕 From your ingredients", dish: "🍲 Dish tutorial", general: "💬 Cooking help" }[m.mode] || m.mode));
     div.append(el("div", "", renderMarkdown(m.content)));
+
+    // Action bar: Save to Cookbook, Add Ingredients to Grocery, and Quick Timers
+    const actions = el("div", "msg-actions");
+    const isSaved = recipesIndex.some((r) => r.msg_id && r.msg_id === m.id);
+    const saveBtn = el("button", `msg-action-btn${isSaved ? " saved" : ""}`, isSaved ? "✓ Saved in Cookbook" : "📖 Save to Cookbook");
+    saveBtn.type = "button";
+    saveBtn.onclick = () => saveRecipeFromMessage(m);
+    actions.append(saveBtn);
+
+    const detectedIngredients = extractIngredientsFromMarkdown(m.content);
+    if (detectedIngredients.length > 0) {
+      const grocBtn = el("button", "msg-action-btn", `🛒 Add ${detectedIngredients.length} to Grocery`);
+      grocBtn.type = "button";
+      grocBtn.title = "Extract ingredients into your Smart Grocery List";
+      grocBtn.onclick = () => addIngredientsFromText(m.content, extractRecipeTitle(m.content, current?.title));
+      actions.append(grocBtn);
+    }
+
+    const detectedTimers = extractTimersFromMarkdown(m.content);
+    for (const dt of detectedTimers) {
+      const tBtn = el("button", "msg-action-btn", `⏱️ ${dt.shortLabel} · ${dt.label.replace(/\s*\([^)]*\)$/, "").slice(0, 22)}`);
+      tBtn.type = "button";
+      tBtn.title = `Start timer for: ${dt.stepDetail || dt.label}`;
+      tBtn.onclick = () => startKitchenTimer(dt.sec, dt.label, dt.stepDetail);
+      actions.append(tBtn);
+    }
+
+    div.append(actions);
   } else div.textContent = m.content;
   return div;
 }
@@ -414,6 +1097,7 @@ async function send(ev) {
   const input = $("input");
   const text = input.value.trim();
   if (!text && !pending.length) return;
+  closeRecipeViewer();
   busy = true; $("send").disabled = true;
 
   const images = pending; pending = []; renderAttachments(); input.value = ""; autoGrow();
@@ -428,7 +1112,7 @@ async function send(ev) {
   const typing = appendNode(el("div", "msg assistant typing", "<span></span><span></span><span></span>"));
 
   try {
-    // 1) persist photos (best effort - chat still works if storage is full)
+    // 1) persist photos (resilient R2 + KV fallback)
     if (images.length) {
       setStatus("Saving photos…");
       await Promise.all(images.map(async (img, i) => {
@@ -496,6 +1180,169 @@ function wireUi() {
   $("toggle-sidebar").onclick = () => $("app").classList.toggle("collapsed");
   const closeBtn = $("close-sidebar");
   if (closeBtn) closeBtn.onclick = () => $("app").classList.add("collapsed");
+
+  // Sidebar Tabs (Chats / Cookbook / Grocery)
+  ["chats", "cookbook", "grocery"].forEach((tab) => {
+    const btn = $(`tab-${tab}`);
+    if (btn) btn.onclick = () => switchTab(tab);
+  });
+  if ($("open-cookbook-btn")) {
+    $("open-cookbook-btn").onclick = () => {
+      switchTab("cookbook");
+      $("app").classList.remove("collapsed");
+    };
+  }
+  if ($("recipe-search")) $("recipe-search").oninput = renderCookbookList;
+
+  // Recipe Viewer actions
+  if ($("close-recipe-viewer")) $("close-recipe-viewer").onclick = closeRecipeViewer;
+  if ($("recipe-extract-grocery")) {
+    $("recipe-extract-grocery").onclick = () => {
+      if (activeRecipe) addIngredientsFromText(activeRecipe.content, activeRecipe.title);
+    };
+  }
+  if ($("recipe-extract-timers")) {
+    $("recipe-extract-timers").onclick = () => {
+      if (!activeRecipe) return;
+      const found = extractTimersFromMarkdown(activeRecipe.content);
+      if (!found.length) {
+        $("timer-drawer").hidden = false;
+        toast("No specific durations detected — start a custom timer above!");
+        return;
+      }
+      found.forEach((dt) => startKitchenTimer(dt.sec, dt.label, dt.stepDetail));
+    };
+  }
+  if ($("recipe-cook-chat")) {
+    $("recipe-cook-chat").onclick = () => {
+      if (!activeRecipe) return;
+      const title = activeRecipe.title;
+      closeRecipeViewer();
+      $("input").value = `About my saved recipe "${title}": `;
+      autoGrow();
+      $("input").focus();
+    };
+  }
+
+  // Smart Grocery List actions
+  if ($("grocery-form")) {
+    $("grocery-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const inp = $("grocery-input");
+      const val = inp.value.trim();
+      if (!val) return;
+      groceryList.unshift({ id: uid(), text: val, recipeTitle: "", checked: false });
+      inp.value = "";
+      saveGroceryList();
+    });
+  }
+  if ($("cook-checked-grocery")) {
+    $("cook-checked-grocery").onclick = () => {
+      const checked = groceryList.filter((g) => g.checked);
+      if (!checked.length) {
+        toast("Check the box next to the ingredients you have at home first!");
+        return;
+      }
+      const listStr = checked.map((g) => g.text).join(", ");
+      askAssistantPrompt(
+        `I have these ingredients available in my kitchen: ${listStr}. What delicious dishes can I cook using only these available ingredients (list other things basic things i will need if neccessary), and how do I make them step by step?`,
+        "ingredients"
+      );
+    };
+  }
+  if ($("sub-unchecked-grocery")) {
+    $("sub-unchecked-grocery").onclick = () => {
+      const unchecked = groceryList.filter((g) => !g.checked);
+      if (!unchecked.length) {
+        toast("All items are checked! Uncheck any ingredients you're missing to get substitutions.");
+        return;
+      }
+      const checked = groceryList.filter((g) => g.checked);
+      const missingStr = unchecked.map((g) => g.text).join("; ");
+      const haveStr = checked.length ? ` I already have: ${checked.map((g) => g.text).join("; ")}.` : "";
+      const recipeName = unchecked.find((g) => g.recipeTitle)?.recipeTitle || current?.title || "my recipe";
+      askAssistantPrompt(
+        `For "${recipeName}", I am missing these unchecked ingredients: ${missingStr}.${haveStr} What are the best kitchen substitutions for the missing items, or how can I adjust the recipe without a trip to the store?`,
+        "general"
+      );
+    };
+  }
+  if ($("copy-grocery")) {
+    $("copy-grocery").onclick = async () => {
+      if (!groceryList.length) {
+        toast("Your grocery list is empty.");
+        return;
+      }
+      const unchecked = groceryList.filter((g) => !g.checked);
+      const checked = groceryList.filter((g) => g.checked);
+      const lines = [];
+      if (unchecked.length) {
+        lines.push("🛒 Need to buy:");
+        unchecked.forEach((g) => lines.push(`☐ ${g.text}${g.recipeTitle ? ` (${g.recipeTitle})` : ""}`));
+      }
+      if (checked.length) {
+        if (lines.length) lines.push("");
+        lines.push("✓ Have at home:");
+        checked.forEach((g) => lines.push(`☑ ${g.text}`));
+      }
+      const textOut = lines.join("\n");
+      try {
+        await navigator.clipboard.writeText(textOut);
+        toast("📋 Copied grocery list to clipboard!");
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = textOut;
+        document.body.append(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+        toast("📋 Copied grocery list to clipboard!");
+      }
+    };
+  }
+  if ($("clear-checked-grocery")) {
+    $("clear-checked-grocery").onclick = () => {
+      const before = groceryList.length;
+      groceryList = groceryList.filter((g) => !g.checked);
+      if (groceryList.length !== before) {
+        saveGroceryList();
+        toast("Cleared checked grocery items.");
+      }
+    };
+  }
+  if ($("clear-all-grocery")) {
+    $("clear-all-grocery").onclick = async () => {
+      if (!groceryList.length) return;
+      if (!(await confirmBox("Clear your entire Grocery List?", "Clear all"))) return;
+      groceryList = [];
+      saveGroceryList();
+      toast("Grocery list cleared.");
+    };
+  }
+
+  // Kitchen Timers actions
+  if ($("toggle-timer-btn")) {
+    $("toggle-timer-btn").onclick = () => {
+      const d = $("timer-drawer");
+      d.hidden = !d.hidden;
+    };
+  }
+  if ($("close-timer-drawer")) {
+    $("close-timer-drawer").onclick = () => ($("timer-drawer").hidden = true);
+  }
+  document.querySelectorAll(".preset-timer").forEach((btn) => {
+    btn.onclick = () => startKitchenTimer(Number(btn.dataset.sec), btn.dataset.label);
+  });
+  if ($("custom-timer-form")) {
+    $("custom-timer-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const mins = Math.max(1, Math.min(360, Number($("timer-mins-input").value) || 5));
+      const label = $("timer-label-input").value.trim() || `${mins} min Timer`;
+      $("timer-label-input").value = "";
+      startKitchenTimer(mins * 60, label);
+    });
+  }
+
   $("summarize-btn").onclick = async () => {
     if (!current || busy) return;
     setStatus("Summarizing…");
@@ -515,14 +1362,17 @@ function wireUi() {
 
 async function main() {
   wireUi();
+  renderTimers();
   try {
     anna = await AnnaAppRuntime.connect();
   } catch {
     setStatus("Standalone preview - open through `anna-app dev` or Anna to chat.");
-    $("send").disabled = true; renderSidebar(); return;
+    $("send").disabled = true; renderSidebar(); renderCookbookList(); renderGroceryList(); return;
   }
   try { await anna.window.set_title({ title: "Smart Kitchen Assistant" }); } catch { /* optional */ }
   try { await loadIndex(); } catch (e) { toast(`Could not load history: ${friendlyError(e)}`); }
+  try { await loadCookbook(); } catch { /* optional */ }
+  try { await loadGroceryList(); } catch { /* optional */ }
   renderSidebar(); refreshUsage();
   setStatus("Ready");
 }

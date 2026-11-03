@@ -1,10 +1,16 @@
 {
   "slug": "smart-kitchen-assistant",
   "name": "Smart Kitchen Assistant",
-  "version": "0.2.2",
-  "tagline": "Snap your ingredients or a meal - get recipes and step-by-step cooking help.",
-  "description": "Smart Kitchen Assistant is your AI cooking companion. Chat with or without images: photograph the ingredients you have and get dish suggestions you can make right now, or photograph a finished meal and learn exactly how to cook it with a full ingredient list and step-by-step instructions. Every conversation (including photos) is saved so you can return to it from the history sidebar, and stored photos can be cleared at any time.",
+  "version": "0.3.1",
+  "tagline": "Snap ingredients or dishes — get recipes, save to Cookbook, build Grocery lists & run Timers.",
+  "description": "Smart Kitchen Assistant is your all-in-one AI cooking companion. Chat with or without photos: snap the ingredients you have for instant dish ideas, or photograph a finished meal to get the full recipe and step-by-step instructions. Save your favorite recipes to your personal Cookbook with one click, automatically extract ingredients into an interactive Smart Grocery List, and launch live Kitchen Timers directly from cooking steps.",
   "category": "productivity",
+  "logo_file": "assets/logo.png",
+  "screenshots": [
+    "assets/screenshot-1-vision-dish.png",
+    "assets/screenshot-2-cookbook-grocery.png",
+    "assets/screenshot-3-grocery-timers.png"
+  ],
 
   "_comment_bundled_executas": "Executas that ship inside this app. `anna-app apps publish` publishes each one first, then substitutes its server-minted tool_id into every `bundled:<handle>` reference in manifest.json (in memory - the file on disk is never mutated) and writes bundle/anna-tool-ids.js so the UI bundle can read the same ids.",
   "bundled_executas": {
